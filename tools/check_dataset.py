@@ -23,6 +23,7 @@ def main() -> None:
 
     problems: list[str] = []
     qa_types, anomalies, sources = Counter(), Counter(), Counter()
+    styles, turns = Counter(), Counter()
     total = 0
     missing = set()
 
@@ -31,13 +32,20 @@ def main() -> None:
         for i, s in enumerate(data):
             total += 1
             msgs = s.get("messages", [])
-            if len(msgs) < 2 or msgs[0]["role"] != "user" or msgs[1]["role"] != "assistant":
-                problems.append(f"{fp}#{i}: messages 结构异常")
+            body = [m for m in msgs if m.get("role") != "system"]
+            if len(body) < 2 or len(body) % 2 or any(
+                    m["role"] != ("user" if k % 2 == 0 else "assistant")
+                    for k, m in enumerate(body)):
+                problems.append(f"{fp}#{i}: messages 必须是 system? + user/assistant 交替")
                 continue
-            n_tok = msgs[0]["content"].count("<image>")
+            turns[(len(body) // 2)] += 1
+            n_tok = sum(m["content"].count("<image>") for m in body)
             if n_tok != len(s.get("images", [])):
                 problems.append(f"{fp}#{i}: <image> 数量({n_tok}) 与 images 数量({len(s.get('images', []))}) 不一致")
-            for box in BOX_RE.findall(msgs[1]["content"]):
+            if body[0]["content"].count("<image>") != n_tok:
+                problems.append(f"{fp}#{i}: <image> 应全部出现在首轮 user 消息中")
+            answers = " ".join(m["content"] for m in body[1::2])
+            for box in BOX_RE.findall(answers):
                 x1, y1, x2, y2 = map(int, box)
                 if not (0 <= x1 < x2 <= args.box_scale and 0 <= y1 < y2 <= args.box_scale):
                     problems.append(f"{fp}#{i}: 坐标越界或反向 {box}")
@@ -50,6 +58,7 @@ def main() -> None:
             for a in (ex.get("anomaly") or ["?"]):
                 anomalies[a] += 1
             sources[ex.get("source_dataset", "?")] += 1
+            styles[ex.get("instruction_style", "-")] += 1
 
     def show(title: str, c: Counter) -> None:
         print(f"\n{title}")
@@ -60,6 +69,9 @@ def main() -> None:
     show("题型分布", qa_types)
     show("异常类别分布", anomalies)
     show("数据来源分布", sources)
+    if len(styles) > 1:
+        show("指令风格分布", styles)
+    show("对话轮数分布", Counter({f"{k} 轮": v for k, v in turns.items()}))
 
     neg = anomalies.get("normal", 0) / max(1, total)
     print(f"\n正常(负)样本占比 {neg:.1%}  阈值 {args.min_negative_ratio:.0%}"
