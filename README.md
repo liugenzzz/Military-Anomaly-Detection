@@ -30,7 +30,8 @@
 异常本体与 VQA schema 设计见 **[docs/02_ontology_and_schema.md](docs/02_ontology_and_schema.md)**；
 **按优先级排好的下载清单、以及视频要不要处理，见 [docs/03_acquisition_checklist.md](docs/03_acquisition_checklist.md)**；
 质量筛选的五道闸与阈值见 [docs/04_quality_screening.md](docs/04_quality_screening.md)；
-指令型 QA 的生成与防幻觉设计见 [docs/05_instruction_design.md](docs/05_instruction_design.md)。
+指令型 QA 的生成与防幻觉设计见 [docs/05_instruction_design.md](docs/05_instruction_design.md)；
+**最终选定哪 8 个源数据集、不选哪些、以及框架选型，见 [docs/06_final_selection.md](docs/06_final_selection.md)**。
 
 ## 快速开始
 
