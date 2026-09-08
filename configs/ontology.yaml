@@ -1,0 +1,80 @@
+# 军事异常检测本体定义
+# cues: 供规则引擎与 VLM prompt 使用的判定线索
+# rule: 可自动判定的量化条件(由 tools/derive_events.py 消费)
+
+version: "0.1.0"
+box_scale: 1000          # grounding 坐标归一化上限, Qwen-VL 系列用 1000
+negative_ratio_target: 0.30   # normal 样本占比下限
+
+classes:
+  - id: normal
+    zh: 正常
+    cues: ["无成规模目标聚集", "无烟火", "无越界行为"]
+
+  - id: massing
+    zh: 兵力集结
+    cues: ["同类目标密集成簇", "规则排列/列阵", "开阔地带集中停放"]
+    rule:
+      kind: density_cluster
+      target_classes: ["vehicle", "large-vehicle", "tank", "truck", "plane", "helicopter"]
+      min_cluster_size: 8         # 簇内目标数下限
+      eps_ratio: 0.06             # 邻域半径 = eps_ratio * 图像对角线
+
+  - id: crowd_gathering
+    zh: 人员聚集
+    cues: ["人头密度骤增", "成团分布", "非常态集会"]
+    rule:
+      kind: density_cluster
+      target_classes: ["person", "pedestrian", "people", "soldier", "head"]
+      min_cluster_size: 20
+      eps_ratio: 0.04
+
+  - id: convoy
+    zh: 车队机动
+    cues: ["车辆沿道路线性排列", "同向运动", "间距均匀"]
+    rule:
+      kind: linear_formation
+      target_classes: ["vehicle", "large-vehicle", "truck", "car"]
+      min_count: 5
+      collinearity_r2: 0.90
+
+  - id: explosion
+    zh: 爆炸/火光
+    cues: ["强亮斑与火球", "扬尘与碎片扩散", "瞬时高对比亮区"]
+    rule: {kind: label_transfer, from_labels: ["Explosion", "fire", "Arson", "Riot"]}
+
+  - id: smoke
+    zh: 烟雾
+    cues: ["烟柱", "灰白扩散团", "烟幕遮蔽地表"]
+    rule: {kind: label_transfer, from_labels: ["smoke", "Smoke", "fire"]}
+
+  - id: border_crossing
+    zh: 越界移动
+    cues: ["目标轨迹跨越边界线", "进入禁入区域", "由界外向界内移动"]
+    rule:
+      kind: boundary_cross
+      target_classes: ["person", "vehicle", "soldier", "truck"]
+      min_displacement_ratio: 0.02   # 相对图像对角线的最小位移, 过滤抖动
+
+  - id: fortification
+    zh: 阵地/工事构筑
+    cues: ["新增土方与壕沟", "掩体轮廓", "工程机械作业"]
+    rule: {kind: label_transfer, from_labels: ["constructing", "excavator"]}
+
+  - id: air_activity
+    zh: 航空活动异常
+    cues: ["停机坪飞机数量异常", "直升机起降", "机群列队"]
+    rule:
+      kind: density_cluster
+      target_classes: ["plane", "helicopter", "aircraft", "fixed-wing-aircraft"]
+      min_cluster_size: 6
+      eps_ratio: 0.10
+
+  - id: naval_massing
+    zh: 舰船集结
+    cues: ["港口舰船密集停泊", "海上编队航行"]
+    rule:
+      kind: density_cluster
+      target_classes: ["ship", "vessel", "maritime-vessel", "warship"]
+      min_cluster_size: 6
+      eps_ratio: 0.08

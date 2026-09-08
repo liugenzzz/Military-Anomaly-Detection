@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 原始数据与中间产物不入库
+data/raw/
+data/interim/
+data/vqa/*.json
+!data/vqa/.gitkeep
+
+saves/
+*.log
+.DS_Store

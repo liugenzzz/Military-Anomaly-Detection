@@ -1,0 +1,227 @@
+[
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "<image>请判断当前监控画面是否出现异常，并说明依据。"
+   },
+   {
+    "role": "assistant",
+    "content": "是。画面中存在异常：越界移动。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crossing_002.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crossing_002",
+   "qa_type": "judgement",
+   "anomaly": [
+    "border_crossing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "view": "uav"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "<image>请识别图中异常活动的类型。\n候选：人员聚集、舰船集结、阵地/工事构筑、越界移动"
+   },
+   {
+    "role": "assistant",
+    "content": "越界移动。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crossing_002.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crossing_002",
+   "qa_type": "classification",
+   "anomaly": [
+    "border_crossing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "view": "uav"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "<image>画面中可见多少个 vehicle？"
+   },
+   {
+    "role": "assistant",
+    "content": "3 个。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crossing_002.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crossing_002",
+   "qa_type": "counting",
+   "anomaly": [
+    "border_crossing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "view": "uav"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "<image>请给出画面中最显著的 vehicle 的边界框坐标。"
+   },
+   {
+    "role": "assistant",
+    "content": "[vehicle] [394, 406, 416, 438]"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crossing_002.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crossing_002",
+   "qa_type": "grounding",
+   "anomaly": [
+    "border_crossing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "view": "uav"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "<image>位于画面中央的 vehicle 是静止还是移动的？"
+   },
+   {
+    "role": "assistant",
+    "content": "该 vehicle 处于移动状态。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crossing_002.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crossing_002",
+   "qa_type": "attribute",
+   "anomaly": [
+    "border_crossing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "view": "uav"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "<image>目标相对于「restricted_zone_A」的位置关系发生了什么变化？"
+   },
+   {
+    "role": "assistant",
+    "content": "该 vehicle 自边界线一侧越至另一侧，构成越界移动。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crossing_002.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crossing_002",
+   "qa_type": "spatial",
+   "anomaly": [
+    "border_crossing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "view": "uav"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "<image>用一段话概括画面的态势要点。"
+   },
+   {
+    "role": "assistant",
+    "content": "这是一张无人机航拍画面，可见3 个 vehicle。画面呈现越界移动特征，建议持续观察并上报。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crossing_002.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crossing_002",
+   "qa_type": "description",
+   "anomaly": [
+    "border_crossing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "view": "uav"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "<image>请说明越界行为的发生方向与判定依据。"
+   },
+   {
+    "role": "assistant",
+    "content": "判定依据：目标轨迹跨越边界线；进入禁入区域；由界外向界内移动。规则量化结果为 N/A。综合以上特征，判定为越界移动。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crossing_002.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crossing_002",
+   "qa_type": "reasoning",
+   "anomaly": [
+    "border_crossing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "view": "uav"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "user",
+    "content": "<image>画面中是否出现了爆炸/火光？"
+   },
+   {
+    "role": "assistant",
+    "content": "否。画面中未观察到爆炸/火光的迹象。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crossing_002.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crossing_002",
+   "qa_type": "negation",
+   "anomaly": [
+    "border_crossing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "view": "uav"
+  }
+ }
+]
