@@ -20,7 +20,8 @@
 ```
 
 完整数据源清单、许可说明与推荐取样配比见 **[docs/01_data_sources.md](docs/01_data_sources.md)**；
-异常本体与 VQA schema 设计见 **[docs/02_ontology_and_schema.md](docs/02_ontology_and_schema.md)**。
+异常本体与 VQA schema 设计见 **[docs/02_ontology_and_schema.md](docs/02_ontology_and_schema.md)**；
+**按优先级排好的下载清单、以及视频要不要处理，见 [docs/03_acquisition_checklist.md](docs/03_acquisition_checklist.md)**。
 
 ## 快速开始
 

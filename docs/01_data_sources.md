@@ -1,5 +1,7 @@
 # 数据源调研：军事异常检测多模态 VQA
 
+> **按优先级排好的下载清单见 [03_acquisition_checklist.md](03_acquisition_checklist.md)**（含每个数据集喂哪项能力、视频要不要处理）。本文是完整调研底稿。
+
 > 结论先说：**没有现成的「军事异常 VQA」数据集**，但可以用「军事目标外观数据 + 通用异常/事件数据 + 航拍监控底座数据 + 少量合成数据」四层拼出来，再用规则 + VLM 自动生成 QA 对。下面是逐层的候选清单。
 
 ---
@@ -72,6 +74,41 @@
 - **Drone-Anomaly**：7 个场景、37 训练/22 测试视频序列，51,635 训练帧 + 35,853 测试帧，10 类异常事件。<https://github.com/Jin-Pu/Drone-Anomaly>
 - **UIT-ADrone**：51 段视频、206K 帧、1080p，环岛交通异常，10 类异常。<https://ieeexplore.ieee.org/document/10158513/>
 - 用途：提供「**什么叫异常**」的范式样本 —— 正常/异常成对的同场景数据，对训练模型不乱报警特别有价值。
+
+---
+
+## 2.5 语言标注层（提供"说得出"—— 这是生成异常说明的关键）
+
+只有异常标签训不出"生成说明"的能力，必须有自然语言标注。以下几个是这两年新出的、直接可用的：
+
+### CapERA —— ERA 的文字版 ⭐⭐
+- 给 ERA 全部 2,864 段航拍视频补上**每段 5 条人工 caption**，内容涵盖主体事件、目标、地点、动作、数量、时间。训练/测试 1,473 / 1,391 段。
+- <https://github.com/yakoubbazi/CapEra> · 论文：<https://www.mdpi.com/2072-4292/15/8/2139>
+- **和 ERA 是同一批视频**，下了 ERA 就等于免费拿到航拍事件的人工描述，性价比最高的一个。
+
+### HIVAU-70k —— 层级化异常理解指令数据 ⭐⭐
+- **7 万+ 条指令标注**，覆盖 UCF-Crime + XD-Violence，分 clip / event / video 三个粒度，题型含**判断、描述、因果分析**。出自 CVPR 2025 的 Holmes-VAU。
+- <https://github.com/pipixin321/HolmesVAU> · 论文：<https://arxiv.org/abs/2412.06171>
+- 已经是指令微调格式，**改改 prompt 就能直接进 LLaMA-Factory**，是最省事的一份。
+
+### UCA（UCF-Crime Annotation）
+- 1,854 段视频、23,542 句描述、110.7 小时，平均每句 20 词，**事件起止时间精确到 0.1 秒**。CVPR 2024。
+- <https://xuange923.github.io/Surveillance-Video-Understanding>
+- 精确时间戳的价值：能从异常视频里切出干净的正常段做困难负样本（见 03 文档）。
+
+### CUVA —— 异常因果基准
+- 42 个异常子类，每条含 **what（是什么）/ why（为什么发生）/ how（造成什么影响）** 三段人工标注，配套 MMEval 评测指标。CVPR 2024。
+- <https://github.com/fesvhtr/CUVA> · 论文：<https://arxiv.org/abs/2405.00181>
+- 用途：推理题的**标注范式直接照抄**，what/why/how 三段式非常适合改写成军事态势研判。
+
+### VRSBench / GeoChat_Instruct —— 遥感区域指代
+- VRSBench：29,614 遥感图 + **52,472 条 object refer** + 310 万 QA。<https://huggingface.co/datasets/xiang709/VRSBench>
+- GeoChat_Instruct：318k 遥感多模态指令，含区域描述与 visual grounding。<https://github.com/mbzuai-oryx/geochat>
+- 用途：你要的「文字 + 图像区域」正是它们的核心任务形式。建议**按 10–15% 比例混入训练**，既提供 grounding 范式，又防止模型在军事领域过拟合后丧失通用遥感能力。
+
+### MilChat / MilData（方法论参考，数据未公开）
+- 2025 年的军事遥感 MLLM，针对隐蔽军事设施（含导弹发射场），用 CoT 标注做 SFT + GRPO 强化，报告 80%+ recall / 98% precision。<https://www.alphaxiv.org/abs/2505.07984v1>
+- **MilData 未公开释出**，但它把"抑制民用场景假阳性"当作核心优化目标——这条经验值得直接采纳。
 
 ---
 
