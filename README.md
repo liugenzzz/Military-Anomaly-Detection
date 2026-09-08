@@ -31,7 +31,8 @@
 **按优先级排好的下载清单、以及视频要不要处理，见 [docs/03_acquisition_checklist.md](docs/03_acquisition_checklist.md)**；
 质量筛选的五道闸与阈值见 [docs/04_quality_screening.md](docs/04_quality_screening.md)；
 指令型 QA 的生成与防幻觉设计见 [docs/05_instruction_design.md](docs/05_instruction_design.md)；
-**最终选定哪 8 个源数据集、不选哪些、以及框架选型，见 [docs/06_final_selection.md](docs/06_final_selection.md)**。
+**最终选定哪 8 个源数据集、不选哪些、以及框架选型，见 [docs/06_final_selection.md](docs/06_final_selection.md)**；
+**这 8 个的下载地址与下载顺序见 [docs/07_download_list.md](docs/07_download_list.md)**。
 
 ## 快速开始
 
@@ -92,6 +93,7 @@ tools/derive_events.py             规则派生异常事件标签
 tools/screen.py                    质量筛选闸1-4 + 合并闸5 VLM 复核结果
 tools/build_vqa.py                 Scene → 9 类题型规则 VQA
 tools/llm_qa.py                    FACTS 事实包 → LLM 指令型 VQA → 校验
+tools/make_golden.py               自动构建 golden set(零人工) + 训练集排除清单
 tools/check_dataset.py             数据体检(路径/坐标/分布/风格/轮数/正负比)
 data/dataset_info.json             LLaMA-Factory 数据集注册
 docs/                              数据源调研 + schema 设计

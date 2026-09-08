@@ -238,6 +238,8 @@ def main() -> None:
     ap.add_argument("--ontology", default="configs/ontology.yaml")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-split", action="store_true", help="不切分, 只输出单个 all.json")
+    ap.add_argument("--exclude-ids", default=None,
+                    help="golden set 的 image_id 清单, 必须排除否则泄漏(make_golden.py 产出)")
     args = ap.parse_args()
 
     onto = yaml.safe_load(Path(args.ontology).read_text(encoding="utf-8"))
@@ -246,6 +248,11 @@ def main() -> None:
 
     builder = QABuilder(onto, seed=args.seed)
     scenes = load_scenes(args.scenes)
+    if args.exclude_ids:
+        excl = {ln.strip() for ln in Path(args.exclude_ids).read_text(encoding="utf-8").splitlines() if ln.strip()}
+        before = len(scenes)
+        scenes = [s for s in scenes if s.image_id not in excl]
+        print(f"排除 golden set: {before} -> {len(scenes)} 个 scene")
     samples = [qa for s in scenes for qa in builder.build(s)]
 
     out_dir = Path(args.out_dir)

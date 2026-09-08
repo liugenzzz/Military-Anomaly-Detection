@@ -193,9 +193,19 @@ def load_prompt(name: str, prompt_dir: str) -> str:
     return Path(prompt_dir, name).read_text(encoding="utf-8")
 
 
+def load_scenes_excluding(path: str, exclude_file: str | None) -> list[Scene]:
+    scenes = load_scenes(path)
+    if not exclude_file:
+        return scenes
+    excl = {ln.strip() for ln in Path(exclude_file).read_text(encoding="utf-8").splitlines() if ln.strip()}
+    kept = [s for s in scenes if s.image_id not in excl]
+    print(f"排除 golden set: {len(scenes)} -> {len(kept)} 个 scene")
+    return kept
+
+
 def cmd_review(args, onto):
     tmpl = load_prompt("review_image.txt", args.prompt_dir)
-    scenes = load_scenes(args.scenes)
+    scenes = load_scenes_excluding(args.scenes, args.exclude_ids)
     zh = {c["id"]: c["zh"] for c in onto["classes"]}
 
     def make(s: Scene) -> dict:
@@ -221,7 +231,7 @@ def cmd_review(args, onto):
 
 def cmd_generate(args, onto):
     tmpl = load_prompt("generate_qa.txt", args.prompt_dir)
-    scenes = load_scenes(args.scenes)
+    scenes = load_scenes_excluding(args.scenes, args.exclude_ids)
     qa_types = ", ".join(args.qa_types or DEFAULT_QA_TYPES)
 
     reqs = []
@@ -346,6 +356,8 @@ def main() -> None:
         p.add_argument("--workers", type=int, default=8)
         p.add_argument("--inline-images", action="store_true", help="图像转 base64 内联(远端 API 需要)")
         p.add_argument("--dry-run", action="store_true", help="只写请求, 不调用 API")
+        p.add_argument("--exclude-ids", default=None,
+                       help="golden set 的 image_id 清单, 必须排除否则泄漏(make_golden.py 产出)")
 
     p = sub.add_parser("review", help="闸5 图像质检")
     p.add_argument("--scenes", required=True); common(p)
