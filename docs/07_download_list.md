@@ -30,10 +30,17 @@
 军机集结同样是装备集结，且 MAR20 是学术发布、原始遥感影像，质量档次远高于社区汇编数据集。
 
 ```bash
-python tools/prepare.py mar20 --root data/raw/MAR20 --out data/interim/mar20.jsonl
-# Roboflow 的 YOLO 版:
-python tools/prepare.py mar20 --root data/raw/MAR20 --format yolo --classes classes.txt --out ...
+python tools/prepare.py mar20 --root data/raw/MAR20 --out data/interim/mar20.jsonl      # 官方版/VOC 格式
+python tools/prepare.py mar20 --root data/raw/MAR20 --format yolo --out ...             # Roboflow YOLO 版
 ```
+
+**Roboflow 下载步骤**：页面左侧 Dataset 标签 → 选版本 → Download Dataset → Format 选
+**Pascal VOC**（适配器默认格式）→ 「Download zip」或「Show download code」拿到 curl 命令。
+需要一个免费账号。服务器上直接跑那条 `curl -L "https://universe.roboflow.com/ds/XXX?key=YYY" > roboflow.zip` 最省事。
+
+⚠️ **选版本时必看 Preprocessing**：Roboflow 常见默认是 Resize 到 640×640，而 MAR20 是高分辨率
+遥感图、飞机只占几十像素，压缩后小目标糊掉，不能用于 grounding。要挑 Preprocessing 无 Resize、
+Augmentation 为 `No augmentations applied` 的版本。**都做了 resize 就改用官方原版。**
 
 ## 2. Mendeley UAV 军事目标 ⚠️ 降级为补充，只取 tank
 

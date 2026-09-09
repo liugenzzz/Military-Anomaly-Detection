@@ -68,6 +68,10 @@ python tools/prepare.py mar20 --root ... --format yolo --classes classes.txt --o
 
 MAR20 的 20 个类别名是 `A1`..`A20`（机型代号），**全部是军机**，统一映射为 `military-plane`，机型代号保留在 `attrs.model` 里供属性题使用。会自动在 `Annotations/Horizontal Bounding Boxes/` 下找 XML。
 
+**Roboflow 镜像版**：目录是 `train/valid/test` 三段、文件名带 `.rf.<hash>` 后缀，适配器会递归查找，不用改目录结构；YOLO 版的类名写在 `data.yaml` 里，会自动读取，不必手动给 `--classes`。
+
+⚠️ **下载前务必检查该 version 的 Preprocessing**：Roboflow 常见的默认预处理是 Resize 到 640×640。MAR20 是高分辨率遥感图，飞机本来只占几十像素，压到 640 之后小目标基本糊掉，不适合用于 grounding 训练。挑 Preprocessing 里没有 Resize、Augmentation 显示 `No augmentations applied` 的版本；若所有版本都做了 resize，改用官方原版 <https://gcheng-nwpu.github.io/>。增强版本还会把一张图复制成多张，图片数虚高但信息量没涨，且污染去重统计。
+
 ### 3. FASDD_UAV —— 取 COCO 子目录
 
 ```bash

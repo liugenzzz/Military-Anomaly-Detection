@@ -12,7 +12,10 @@
   - 20 个类别名是 A1..A20(机型代号), **全部是军用飞机**, 统一映射为 military-plane,
     机型代号保留在 attrs.model 里, 供属性题使用
   - military-plane 命中 ontology 的 require_any, 因此机群密集停放会被判为装备集结
-  - 若拿到的是 Roboflow 的 YOLO 版, 用 --format yolo 并给 --classes
+  - Roboflow 导出版会重命名文件并重划分 train/valid/test, 适配器会递归查找, 无需改目录
+  - Roboflow 的 YOLO 版类名在 data.yaml 里, 会自动读取, 不必手动给 --classes
+  - **注意 Roboflow 版本的预处理**: 若该版本做了 Resize(常见默认 640x640),
+    高分辨率遥感图里的小飞机会被压糊, 不适合用于 grounding 训练, 建议改用官方原版
 """
 from __future__ import annotations
 
@@ -38,6 +41,28 @@ def _norm(name: str) -> tuple[str, str | None]:
     return "military-plane", n                       # MAR20 里没有非军机类别
 
 
+def _load_class_names(root: Path, classes_file: str | None) -> list[str]:
+    """类名来源: 显式 --classes > Roboflow 的 data.yaml > classes.txt / *.names。"""
+    cands = [Path(classes_file)] if classes_file else []
+    cands += [*root.rglob("data.yaml"), *root.rglob("classes.txt"), *root.rglob("*.names")]
+    for cf in cands:
+        if not cf.exists():
+            continue
+        if cf.suffix in (".yaml", ".yml"):
+            import yaml
+            y = yaml.safe_load(cf.read_text(encoding="utf-8")) or {}
+            n = y.get("names")
+            if isinstance(n, dict):
+                return [n[k] for k in sorted(n, key=lambda x: int(x))]
+            if isinstance(n, list) and n:
+                return [str(x) for x in n]
+        else:
+            lines = [x.strip() for x in cf.read_text(encoding="utf-8").splitlines() if x.strip()]
+            if lines:
+                return lines
+    return []
+
+
 def _find_xml(ann_root: Path, stem: str) -> Path | None:
     for cand in (ann_root / f"{stem}.xml",
                  ann_root / "Horizontal Bounding Boxes" / f"{stem}.xml",
@@ -56,8 +81,11 @@ def build(root: str, img_dir: str | None = None, ann_dir: str | None = None,
     ann_root = Path(ann_dir) if ann_dir else (r / "Annotations" if (r / "Annotations").is_dir() else r)
 
     names: list[str] = []
-    if fmt == "yolo" and classes_file:
-        names = [x.strip() for x in Path(classes_file).read_text(encoding="utf-8").splitlines() if x.strip()]
+    if fmt == "yolo":
+        names = _load_class_names(r, classes_file)
+        if not names:
+            print(f"[warn] {DATASET}: 未找到类别文件(classes.txt / data.yaml), "
+                  f"类名将退化为 class_0/class_1..., 请用 --classes 指定")
 
     scenes, missing = [], 0
     for img in iter_images(imgs_root):
