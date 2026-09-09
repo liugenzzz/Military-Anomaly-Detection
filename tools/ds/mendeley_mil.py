@@ -2,12 +2,24 @@
 
 <https://data.mendeley.com/datasets/9z7yrcrpjk/1>
 
+类别构成(官方数字): tank 3000 图/4990 实例, people 2644/4492, drone 1359/1296,
+soldier 982/3240。
+
+**质量注意事项 —— 这个数据集是二次汇编, 不是原始采集:**
+  - 官方说明图像"主要采集自 Roboflow 和 Kaggle", 标注质量参差, 必须过筛
+  - soldier 类因真实航拍素材不足, 用 **GTA5 游戏引擎生成的合成图**做了增强
+  - 只是"侧重"航拍视角, 实际混有地面视角照片, 需靠 screen.py 的闸4/闸5 剔除
+
+因此本适配器**默认只保留 tank 与 soldier 两类**:
+  - drone: 反无人机检测用的类别, 与本项目 4 类异常无关, 默认丢弃
+  - people: 质量不及 DroneCrowd, 默认丢弃, 人员聚集交给 DroneCrowd
+  - soldier: 默认保留但标 meta.synthetic_risk, 建议控制配比或用 --keep-classes 排除
+装备集结的主力应当是 MAR20(3842 图, 学术发布, 质量档次更高), 本数据集只作补充。
+
 处理要点:
-  - **Mendeley 社区数据集不声明标注格式**, 所以这里自动探测 coco / voc / yolo,
-    不让使用者去猜
-  - tank -> tank(命中 require_any), soldier -> soldier, people -> person, drone -> drone
-  - 数据集含合成增强图。文件名带 syn/aug/synthetic 的标为 meta.synthetic=true,
-    以便后续按需剔除或控制配比(合成占比建议 <= 30%)
+  - **Mendeley 社区数据集不声明标注格式**, 所以这里自动探测 coco / voc / yolo
+  - tank -> tank(命中 ontology 的 require_any), soldier -> soldier
+  - 文件名带 syn/aug/synthetic/gta 的标 meta.synthetic=true
 """
 from __future__ import annotations
 
@@ -30,7 +42,11 @@ CLASS_MAP = {
     "militarycar": "military-vehicle", "militaryvehicle": "military-vehicle",
     "militarytruck": "military-truck",
 }
-SYNTHETIC_HINTS = ("syn", "aug", "synthetic", "generated", "render")
+SYNTHETIC_HINTS = ("syn", "aug", "synthetic", "generated", "render", "gta")
+# 默认保留的类别: drone 与任务无关, people 让位给 DroneCrowd
+DEFAULT_KEEP = ("tank", "soldier")
+# soldier 类掺有 GTA5 渲染图, 单独标记以便控制配比
+SYNTHETIC_RISK_CLASSES = {"soldier"}
 
 
 def _norm(name: str) -> str:
@@ -43,7 +59,7 @@ def _is_synthetic(path: Path) -> bool:
     return any(h in low for h in SYNTHETIC_HINTS)
 
 
-def _from_coco(ann: Path, root: Path) -> list[Scene]:
+def _from_coco(ann: Path, root: Path, keep: set[str]) -> list[Scene]:
     d = json.loads(ann.read_text(encoding="utf-8"))
     cats = {c["id"]: c["name"] for c in d["categories"]}
     by_img = defaultdict(list)
@@ -57,9 +73,11 @@ def _from_coco(ann: Path, root: Path) -> list[Scene]:
         path = lookup.get(fn, root / im["file_name"])
         objs = []
         for i, a in enumerate(by_img.get(im["id"], [])):
+            cls = _norm(cats.get(a["category_id"], "object"))
+            if keep and cls not in keep:
+                continue
             x, y, w, h = a["bbox"]
-            objs.append(Obj(id=i, cls=_norm(cats.get(a["category_id"], "object")),
-                            bbox=[x, y, x + w, y + h]))
+            objs.append(Obj(id=i, cls=cls, bbox=[x, y, x + w, y + h]))
         scenes.append(Scene(image_id=f"{DATASET}_{Path(fn).stem}", image_path=str(path),
                             width=im.get("width") or 0, height=im.get("height") or 0,
                             source_dataset=DATASET, license=LICENSE, view="uav",
@@ -68,10 +86,11 @@ def _from_coco(ann: Path, root: Path) -> list[Scene]:
 
 
 def build(root: str, fmt: str | None = None, classes_file: str | None = None,
-          view: str = "uav") -> list[Scene]:
+          view: str = "uav", keep_classes: tuple[str, ...] | None = None) -> list[Scene]:
     r = Path(root)
+    keep = {c.lower() for c in (keep_classes or DEFAULT_KEEP)}
     fmt = fmt or detect_ann_format(r)
-    print(f"[{DATASET}] 标注格式: {fmt}")
+    print(f"[{DATASET}] 标注格式: {fmt}  保留类别: {sorted(keep)}")
 
     if fmt == "coco":
         anns = [j for j in r.rglob("*.json")
@@ -80,11 +99,11 @@ def build(root: str, fmt: str | None = None, classes_file: str | None = None,
             raise RuntimeError(f"{DATASET}: 探测为 coco 但找不到含 annotations 的 json")
         scenes: list[Scene] = []
         for a in anns:
-            scenes.extend(_from_coco(a, r))
+            scenes.extend(_from_coco(a, r, keep))
         for s in scenes:                              # COCO 里 size 可能缺失
             if not s.width or not s.height:
                 s.width, s.height = image_size(s.image_path)
-        return scenes
+        return _finalize(scenes, keep)
 
     names: list[str] = []
     if fmt == "yolo":
@@ -113,12 +132,28 @@ def build(root: str, fmt: str | None = None, classes_file: str | None = None,
             lab = next((p for p in r.rglob(f"{img.stem}.txt") if p.name != "classes.txt"), None)
             if lab and w and h:
                 raw = parse_yolo_txt(lab, w, h, names)
+        objs = [Obj(id=i, cls=c, bbox=b) for i, (c, b) in
+                enumerate((_norm(n), b) for n, b in raw) if not keep or c in keep]
         scenes.append(Scene(image_id=f"{DATASET}_{img.stem}", image_path=str(img),
                             width=w, height=h, source_dataset=DATASET, license=LICENSE,
-                            view=view,
-                            objects=[Obj(id=i, cls=_norm(n), bbox=b) for i, (n, b) in enumerate(raw)],
+                            view=view, objects=objs,
                             meta={"synthetic": _is_synthetic(img)}))
+    return _finalize(scenes, keep)
+
+
+def _finalize(scenes: list[Scene], keep: set[str]) -> list[Scene]:
+    for s in scenes:
+        if any(o.cls in SYNTHETIC_RISK_CLASSES for o in s.objects):
+            s.meta["synthetic_risk"] = True           # soldier 类掺有 GTA5 渲染图
+    before = len(scenes)
+    scenes = [s for s in scenes if s.objects]         # 过滤后无目标的图不留
     n_syn = sum(1 for s in scenes if s.meta.get("synthetic"))
+    n_risk = sum(1 for s in scenes if s.meta.get("synthetic_risk"))
+    print(f"[{DATASET}] 保留 {len(scenes)} 图(过滤掉 {before - len(scenes)} 张不含目标类别的)")
     if n_syn:
-        print(f"[{DATASET}] 疑似合成增强图 {n_syn}/{len(scenes)}, 已标 meta.synthetic")
+        print(f"  文件名疑似合成: {n_syn}, 已标 meta.synthetic")
+    if n_risk:
+        print(f"  含 soldier 类(官方声明掺有 GTA5 渲染图): {n_risk}, 已标 meta.synthetic_risk")
+    print("  提醒: 本数据集为 Roboflow/Kaggle 二次汇编, 务必接着跑 screen.py 看保留率; "
+          "装备集结主力建议用 MAR20")
     return scenes

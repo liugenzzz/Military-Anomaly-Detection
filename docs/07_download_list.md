@@ -7,8 +7,8 @@
 
 | # | 数据集 | 供哪个类 | 体积估算 | 获取方式 |
 |---|---|---|---|---|
-| 1 | Mendeley UAV 军事目标 | `massing/equipment` | ~1–3 GB | 网页直接下载，无需注册 ⭐ 先下这个 |
-| 2 | MAR20 | `massing/equipment` | ~2–4 GB | 官方主页（可能走网盘）或 Roboflow 镜像 |
+| 1 | MAR20 | `massing/equipment` **主力** | ~2–4 GB | 学术发布，质量最好 ⭐ |
+| 2 | Mendeley UAV 军事目标 | `massing/equipment` 补充 | ~1–3 GB | ⚠️ Roboflow/Kaggle 二次汇编，质量参差，只取 tank |
 | 3 | FASDD_UAV | `smoke` + `explosion` | ~5–10 GB | Science Data Bank，只下 `FASDD_UAV.zip` |
 | 4 | ERA + CapERA | `personnel`/`explosion`/正常 | ~10–20 GB | 主页下载；CapERA 只是标注文件 |
 | 5 | DroneCrowd | `massing/personnel` | ~15–25 GB | GitHub 页给出网盘链接 |
@@ -19,33 +19,50 @@
 
 ---
 
-## 1. Mendeley UAV 多类军事目标 ⭐ 建议第一个下
-
-<https://data.mendeley.com/datasets/9z7yrcrpjk/1>
-
-7,985 张标注图 / 14,018 实例，4 类：tank、drone、people、soldier，航拍视角。
-**唯一「军事目标 + 航拍视角 + bbox」三者齐全**的公开集。
-
-网页直接点下载，不用注册、不用网盘。体积小、格式简单，最适合拿来跑通全链路。
-
-```bash
-python tools/prepare.py mendeley --root data/raw/mendeley --out data/interim/mendeley.jsonl
-```
-
-⚠️ 标注格式官方未声明，适配器会自动探测 coco/voc/yolo 并打印识别结果。含合成增强图，会自动标 `meta.synthetic`。
-
-## 2. MAR20
+## 1. MAR20 ⭐ 装备集结的主力
 
 - 官方：<https://gcheng-nwpu.github.io/>（西北工业大学，可能是百度网盘）
 - YOLO 镜像：<https://universe.roboflow.com/mar20/mar20-s3e1w>（Roboflow，需注册但下载方便）
 
 3,842 张高分辨率遥感图 / 22,341 实例 / 20 类军机，取自全球 60 个军用机场（Google Earth），HBB + OBB 双标注。
 
+**`massing/equipment` 只需约 2,800 张图，MAR20 一个就够。** 装备集结不必须是坦克——
+军机集结同样是装备集结，且 MAR20 是学术发布、原始遥感影像，质量档次远高于社区汇编数据集。
+
 ```bash
 python tools/prepare.py mar20 --root data/raw/MAR20 --out data/interim/mar20.jsonl
 # Roboflow 的 YOLO 版:
 python tools/prepare.py mar20 --root data/raw/MAR20 --format yolo --classes classes.txt --out ...
 ```
+
+## 2. Mendeley UAV 军事目标 ⚠️ 降级为补充，只取 tank
+
+<https://data.mendeley.com/datasets/9z7yrcrpjk/1>
+
+类别构成（官方数字）：
+
+| 类别 | 图片 | 实例 | 处理 |
+|---|---|---|---|
+| tank | 3,000 | 4,990 | ✅ 保留，唯一的地面军事装备来源 |
+| people | 2,644 | 4,492 | ❌ 默认丢弃，让位给 DroneCrowd |
+| drone | 1,359 | 1,296 | ❌ 默认丢弃，反无人机检测与本项目无关 |
+| soldier | 982 | 3,240 | ⚠️ 保留但标记，**掺有 GTA5 引擎生成的合成图** |
+
+**质量提示（重要）**：官方说明图像"主要采集自 **Roboflow 和 Kaggle**"，是二次汇编而非原始采集；
+soldier 类因真实航拍素材不足用 GTA5 合成图做了增强；且只是"侧重"航拍视角，实际混有地面视角照片。
+
+因此适配器默认只保留 `tank` 与 `soldier`，并给含 soldier 的图标 `meta.synthetic_risk`。
+
+```bash
+python tools/prepare.py mendeley --root data/raw/mendeley --out data/interim/mendeley.jsonl
+python tools/prepare.py mendeley --root ... --keep-classes tank --out ...   # 更保守: 只要 tank
+
+# 下完务必先单独过一遍筛选看保留率, 再决定用不用
+python tools/derive_events.py --scenes data/interim/mendeley.jsonl --out data/interim/mendeley_ev.jsonl
+python tools/screen.py --scenes data/interim/mendeley_ev.jsonl --out-dir data/screened_mendeley
+```
+
+保留率低于 50% 就说明不值得投入，直接靠 MAR20 撑 equipment 子类即可。
 
 ## 3. FASDD_UAV
 
@@ -120,7 +137,7 @@ FASDD_UAV 含 36,308 个火焰实例 + 17,222 个烟雾实例。
 
 ## 建议顺序与磁盘预算
 
-**先下 1、2、3**（Mendeley、MAR20、FASDD_UAV）：体量小、都是静态图、不需要 ffmpeg，
+**先下 1、2、3**（MAR20、Mendeley、FASDD_UAV）：体量小、都是静态图、不需要 ffmpeg，
 下完就能跑通 `prepare → derive_events → screen → make_golden → build_vqa` 全链路，
 先验证流程再投入大数据集。
 

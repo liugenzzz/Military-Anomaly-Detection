@@ -15,8 +15,8 @@
 
 | # | 数据集 | 供哪个异常类 | 优先级 |
 |---|---|---|---|
-| 1 | **Mendeley UAV 军事目标** | `massing/equipment`（tank/soldier） | P0 体量小，先拿它跑通 |
-| 2 | **MAR20** | `massing/equipment`（军机） | P0 同上 |
+| 1 | **MAR20** | `massing/equipment` **主力**（军机） | P0 质量最好，单个就够 2800 张目标 |
+| 2 | **Mendeley UAV 军事目标** | `massing/equipment` 补充（仅 tank） | P0 ⚠️ 二次汇编，质量参差 |
 | 3 | **FASDD_UAV** | `smoke` + `explosion`(火光) | P0 |
 | 4 | **ERA + CapERA** | `massing/personnel`、`explosion`、正常 | P1 需抽帧 |
 | 5 | **DroneCrowd** | `massing/personnel` 主力 | P1 ⬆ 类别合并后从选配升为必需 |
@@ -46,9 +46,17 @@ pip install scipy                        # 仅当 DroneCrowd 拿到的是 .mat �
 python tools/prepare.py mendeley --root data/raw/mendeley --out data/interim/mendeley.jsonl
 ```
 
-Mendeley 社区数据集**不声明标注格式**，所以适配器自动探测 coco / voc / yolo，不用你去猜。类别映射 `tank→tank`、`soldier→soldier`、`people→person`、`drone→drone`，其中 `tank` 命中 ontology 的 `require_any`。
+Mendeley 社区数据集**不声明标注格式**，所以适配器自动探测 coco / voc / yolo，不用你去猜。
 
-文件名含 `syn`/`aug`/`synthetic` 的标 `meta.synthetic=true`，方便后续控制合成占比（建议 ≤30%）。
+**默认只保留 `tank` 与 `soldier` 两类**：`drone` 是反无人机检测用的，与本项目 4 类无关；
+`people` 质量不及 DroneCrowd，让位给它。想更保守就 `--keep-classes tank`。
+
+⚠️ **这个数据集是二次汇编，不是原始采集**。官方说明图像"主要采集自 Roboflow 和 Kaggle"，
+soldier 类用 **GTA5 引擎生成的合成图**做过增强，且只是"侧重"航拍视角、实际混有地面视角照片。
+所以含 soldier 的图会标 `meta.synthetic_risk`，文件名含 `syn/aug/gta` 的标 `meta.synthetic`。
+
+**用之前先单独跑一遍 screen.py 看保留率**，低于 50% 就别投入了——`massing/equipment` 只需
+约 2,800 张图，MAR20 的 3,842 张学术发布数据单个就够。
 
 ### 2. MAR20 —— 20 类机型统一为 military-plane
 

@@ -67,6 +67,8 @@ def main() -> None:
     p.add_argument("--root", required=True)
     p.add_argument("--format", dest="fmt", default=None, choices=["coco", "voc", "yolo"])
     p.add_argument("--classes"); p.add_argument("--view", default="uav")
+    p.add_argument("--keep-classes", nargs="*", default=None,
+                   help="保留哪些类别, 默认 tank soldier(drone 与任务无关, people 让位给 DroneCrowd)")
     add_out(p)
 
     p = sub.add_parser("fasdd", help="FASDD_UAV 火焰烟雾(COCO)")
@@ -151,7 +153,8 @@ def main() -> None:
     if a.cmd == "mar20":
         scenes = mar20.build(a.root, a.img_dir, a.ann_dir, a.fmt, a.classes, a.view)
     elif a.cmd == "mendeley":
-        scenes = mendeley_mil.build(a.root, a.fmt, a.classes, a.view)
+        scenes = mendeley_mil.build(a.root, a.fmt, a.classes, a.view,
+                                    tuple(a.keep_classes) if a.keep_classes else None)
     elif a.cmd == "fasdd":
         scenes = fasdd.build(a.root, a.view, keep_negatives=not a.drop_negatives)
     elif a.cmd == "era":
