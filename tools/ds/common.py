@@ -21,12 +21,9 @@ VID_EXT = (".mp4", ".avi", ".mkv", ".mov", ".flv", ".webm", ".mpg", ".mpeg", ".m
 
 # ---------------------------------------------------------------- 图像
 def image_size(path: str | Path) -> tuple[int, int]:
-    try:
-        from PIL import Image
-        with Image.open(path) as im:
-            return im.size
-    except Exception:
-        return 0, 0
+    """读文件头拿宽高, 失败时回落 PIL。遍历几万张图时比逐张解码快一个量级。"""
+    from ds.boxes import image_size_fast
+    return image_size_fast(path)
 
 
 def iter_images(root: str | Path, recursive: bool = True) -> list[Path]:
@@ -225,6 +222,7 @@ def parse_voc_xml(path: str | Path) -> tuple[int, int, list[tuple[str, list[floa
 
 def parse_yolo_txt(path: str | Path, w: int, h: int,
                    names: list[str]) -> list[tuple[str, list[float]]]:
+    """YOLO 归一化 [cx,cy,w,h] -> 像素 [x1,y1,x2,y2], 越界在像素域裁剪。"""
     out = []
     for ln in Path(path).read_text(encoding="utf-8", errors="ignore").splitlines():
         p = ln.split()
@@ -235,9 +233,9 @@ def parse_yolo_txt(path: str | Path, w: int, h: int,
             cx, cy, bw, bh = (float(x) for x in p[1:5])
         except ValueError:
             continue
+        from ds.boxes import yolo_to_pixel_xyxy
         out.append((names[ci] if 0 <= ci < len(names) else f"class_{ci}",
-                    [(cx - bw / 2) * w, (cy - bh / 2) * h,
-                     (cx + bw / 2) * w, (cy + bh / 2) * h]))
+                    yolo_to_pixel_xyxy(cx, cy, bw, bh, w, h)))
     return out
 
 

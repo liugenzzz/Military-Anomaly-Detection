@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ds import dota, drone_anomaly, dronecrowd, era, fasdd, hivau, mar20, mendeley_mil, visdrone  # noqa: E402
+from ds.boxes import audit_scene_boxes  # noqa: E402
 from scene import dump_scenes  # noqa: E402
 
 
@@ -43,6 +44,8 @@ def _report(scenes, out: str) -> None:
         print("  自带事件标签:", dict(ev))
     if len(by_src) > 1:
         print("  来源:", dict(by_src))
+    for w in audit_scene_boxes(scenes):
+        print(f"  [坐标自检] {w}")
     print("  下一步: python tools/derive_events.py --scenes "
           f"{out} --out {out.replace('.jsonl', '_ev.jsonl')}")
 

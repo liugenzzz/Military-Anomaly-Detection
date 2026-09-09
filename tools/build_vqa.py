@@ -9,12 +9,15 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from scene import Obj, Scene, load_scenes
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ds.boxes import COORD_MODE, box_json  # noqa: E402
+from scene import Obj, Scene, load_scenes  # noqa: E402
 
 BOX_SCALE = 1000       # grounding 坐标归一化上限; 换基座时只改这里
 
@@ -115,13 +118,13 @@ class QABuilder:
         if cluster_ev:
             box = _norm_box(cluster_ev.evidence["cluster_bbox"], s.width, s.height)
             out.append(self._mk(
-                s, f"请标出画面中{self.zh[cluster_ev.type]}区域的位置，用 [x1,y1,x2,y2] 表示。",
-                f"{self.zh[cluster_ev.type]}区域位于 {box}。", "grounding"))
+                s, f"请框出画面中的{self.zh[cluster_ev.type]}区域，给出坐标。",
+                box_json(box, self.zh[cluster_ev.type]), "grounding"))
         if s.objects:
             o = max(s.objects, key=lambda x: x.area)
             out.append(self._mk(
                 s, f"请给出画面中最显著的 {o.cls} 的边界框坐标。",
-                f"[{o.cls}] {_norm_box(o.bbox, s.width, s.height)}", "grounding"))
+                box_json(_norm_box(o.bbox, s.width, s.height), o.cls), "grounding"))
         return out
 
     def q_attribute(self, s: Scene) -> list[dict]:
@@ -205,6 +208,10 @@ class QABuilder:
                 "source_dataset": s.source_dataset,
                 "license": s.license,
                 "view": s.view,
+                "image_width": s.width,
+                "image_height": s.height,
+                "coordinate_mode": COORD_MODE,
+                "bbox_scale": BOX_SCALE,
             },
         }
 
