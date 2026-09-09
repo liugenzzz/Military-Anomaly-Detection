@@ -34,7 +34,8 @@
 **最终选定哪 8 个源数据集、不选哪些、以及框架选型，见 [docs/06_final_selection.md](docs/06_final_selection.md)**；
 **这 8 个的下载地址与下载顺序见 [docs/07_download_list.md](docs/07_download_list.md)**；
 **异常类型定稿（4 类 + 正常，每类 25000 条）与各类数据缺口见 [docs/08_task_types.md](docs/08_task_types.md)**；
-**9 个数据集各自的处理方式、命令与坑见 [docs/09_dataset_processing.md](docs/09_dataset_processing.md)**。
+**9 个数据集各自的处理方式、命令与坑见 [docs/09_dataset_processing.md](docs/09_dataset_processing.md)**；
+**任务类型定稿（5 类）、数量分配与数据可行性核对见 [docs/10_task_definition.md](docs/10_task_definition.md)**。
 
 ## 快速开始
 
