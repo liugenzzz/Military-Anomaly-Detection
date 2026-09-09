@@ -51,30 +51,49 @@ def _union_find_cluster(points: list[tuple[float, float]], eps: float) -> list[l
     return list(groups.values())
 
 
-def derive_density_cluster(scene: Scene, rule: dict[str, Any], cls_id: str) -> list[Event]:
+def derive_density_cluster(scene: Scene, rule: dict[str, Any], cls_id: str,
+                          subtype: str | None = None) -> list[Event]:
+    """密度聚类派生聚集事件。
+
+    require_any 是关键的一条: 装备集结必须含军事目标, 否则民用停车场/卡车场
+    会被大量错标成兵力集结。规模达标但不含军事目标的簇不产生事件, 而是把该图
+    标为 hard_negative —— 这类"看着像集结但不是"的样本是最有价值的困难负样本。
+    """
     targets = {c.lower() for c in rule["target_classes"]}
     objs = scene.of_classes(targets)
     if len(objs) < rule["min_cluster_size"]:
         return []
 
+    require = {c.lower() for c in rule.get("require_any", [])}
+    on_fail = rule.get("on_require_fail")
     eps = rule["eps_ratio"] * scene.diag
     centers = [o.center for o in objs]
     events = []
     for group in _union_find_cluster(centers, eps):
         if len(group) < rule["min_cluster_size"]:
             continue
+        cls_in_group = {objs[i].cls.lower() for i in group}
+        if require and not (cls_in_group & require):
+            if on_fail == "hard_negative":
+                scene.meta["hard_negative"] = True
+                scene.meta.setdefault("hard_negative_reason", []).append(
+                    f"{cls_id}/{subtype or '-'}: {len(group)} 个目标密集成簇但不含军事目标")
+            continue
         xs = [centers[i][0] for i in group]
         ys = [centers[i][1] for i in group]
+        ev: dict[str, Any] = {
+            "rule": "density_cluster",
+            "count": len(group),
+            "cluster_bbox": [min(xs), min(ys), max(xs), max(ys)],
+            "object_ids": [objs[i].id for i in group],
+            "classes": sorted({objs[i].cls for i in group}),
+        }
+        if subtype:
+            ev["subtype"] = subtype
         events.append(Event(
             type=cls_id,
             conf=min(1.0, len(group) / (2.0 * rule["min_cluster_size"])),
-            evidence={
-                "rule": "density_cluster",
-                "count": len(group),
-                "cluster_bbox": [min(xs), min(ys), max(xs), max(ys)],
-                "object_ids": [objs[i].id for i in group],
-                "classes": sorted({objs[i].cls for i in group}),
-            },
+            evidence=ev,
         ))
     return events
 
@@ -96,7 +115,8 @@ def _r_squared(pts: list[tuple[float, float]]) -> float:
     return (sxy * sxy) / (sxx * syy)
 
 
-def derive_linear_formation(scene: Scene, rule: dict[str, Any], cls_id: str) -> list[Event]:
+def derive_linear_formation(scene: Scene, rule: dict[str, Any], cls_id: str,
+                           subtype: str | None = None) -> list[Event]:
     targets = {c.lower() for c in rule["target_classes"]}
     objs = scene.of_classes(targets)
     if len(objs) < rule["min_count"]:
@@ -142,7 +162,8 @@ def _point_in_polygon(p, poly) -> bool:
     return inside
 
 
-def derive_boundary_cross(scene: Scene, rule: dict[str, Any], cls_id: str) -> list[Event]:
+def derive_boundary_cross(scene: Scene, rule: dict[str, Any], cls_id: str,
+                         subtype: str | None = None) -> list[Event]:
     if not scene.regions or not scene.tracks:
         return []
     targets = {c.lower() for c in rule["target_classes"]}
@@ -198,20 +219,38 @@ _DISPATCH = {
 }
 
 
+def collect_rules(ontology: dict[str, Any]) -> list[tuple[str, str | None, dict[str, Any]]]:
+    """展开为 (class_id, subtype, rule) 列表。停用的类别(enabled: false)跳过。"""
+    out = []
+    for cls in ontology["classes"]:
+        if not cls.get("enabled", True):
+            continue
+        if cls.get("rule", {}).get("kind") in _DISPATCH:
+            out.append((cls["id"], None, cls["rule"]))
+        for st in cls.get("subtypes", []):
+            if st.get("rule", {}).get("kind") in _DISPATCH:
+                out.append((cls["id"], st["name"], st["rule"]))
+    return out
+
+
 def derive(scenes: list[Scene], ontology: dict[str, Any], overwrite: bool = False) -> list[Scene]:
+    rules = collect_rules(ontology)
     for scene in scenes:
         if overwrite:
             scene.events = [e for e in scene.events if e.evidence.get("rule") is None]
+            scene.meta.pop("hard_negative", None)
+            scene.meta.pop("hard_negative_reason", None)
         existing = {(e.type, str(sorted(e.evidence.items()))) for e in scene.events}
-        for cls in ontology["classes"]:
-            rule = cls.get("rule")
-            if not rule or rule["kind"] not in _DISPATCH:
-                continue
-            for ev in _DISPATCH[rule["kind"]](scene, rule, cls["id"]):
+        for cls_id, subtype, rule in rules:
+            for ev in _DISPATCH[rule["kind"]](scene, rule, cls_id, subtype):
                 key = (ev.type, str(sorted(ev.evidence.items())))
                 if key not in existing:
                     existing.add(key)
                     scene.events.append(ev)
+        # 事件与困难负样本互斥: 有真事件就不是负样本
+        if scene.events:
+            scene.meta.pop("hard_negative", None)
+            scene.meta.pop("hard_negative_reason", None)
     return scenes
 
 
@@ -229,12 +268,17 @@ def main() -> None:
 
     hist: dict[str, int] = {}
     for s in scenes:
-        for t in s.anomaly_types:
-            hist[t] = hist.get(t, 0) + 1
+        for e in s.events:
+            key = e.type + (f"/{e.evidence['subtype']}" if "subtype" in e.evidence else "")
+            hist[key] = hist.get(key, 0) + 1
     n_normal = sum(1 for s in scenes if not s.events)
-    print(f"scenes={len(scenes)}  无事件(正常)={n_normal}")
+    n_hard = sum(1 for s in scenes if s.meta.get("hard_negative"))
+    print(f"scenes={len(scenes)}  无事件(正常)={n_normal}  其中困难负样本={n_hard}")
     for k, v in sorted(hist.items(), key=lambda kv: -kv[1]):
-        print(f"  {k:20s} {v}")
+        print(f"  {k:24s} {v}")
+    if n_hard:
+        print(f"\n  困难负样本 = 规模达标但不含军事目标的聚集(如民用停车场), "
+              f"占正常样本 {n_hard / max(1, n_normal):.1%}")
 
 
 if __name__ == "__main__":

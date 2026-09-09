@@ -1,6 +1,9 @@
 # 异常本体与 VQA Schema 设计
 
-## 1. 异常类别本体（10 类，见 `configs/ontology.yaml`）
+## 1. 异常类别本体
+
+> ⚠️ **已在 v0.2 收敛为 4 类异常 + 正常，定稿见 [08_task_types.md](08_task_types.md)。**
+> 下表是最初的 10 类设计，保留作为背景；停用的类别仍在 `configs/ontology.yaml` 中标 `enabled: false`。
 
 分三级：`大类 → 异常类 → 判定线索`。判定线索是给规则引擎和 VLM prompt 用的。
 

@@ -1,36 +1,90 @@
-# 军事异常检测本体定义
-# cues: 供规则引擎与 VLM prompt 使用的判定线索
-# rule: 可自动判定的量化条件(由 tools/derive_events.py 消费)
+# 军事异常检测本体定义 v0.2
+#
+# v0.2 变更(决策见 docs/08_task_types.md):
+#   - 从 10 类收敛到 4 类异常 + 正常, 每类目标 25,000 条 QA
+#   - 兵力集结与人员聚集合并为「异常聚集」, 保留 subtype 子标签
+#   - 装备集结新增 require_any 军事目标约束: 纯民用车辆密集聚集不算异常,
+#     而是标为 hard_negative 困难负样本(避免把停车场训成装甲集群)
+#   - 人员聚集不设军事身份要求: 航拍视角分辨不出军装, 该约束不可实现
+#   - 停用的类别保留在文件末尾(enabled: false), 便于日后一行恢复
 
-version: "0.1.0"
-box_scale: 1000          # grounding 坐标归一化上限, Qwen-VL 系列用 1000
-negative_ratio_target: 0.30   # normal 样本占比下限
+version: "0.2.0"
+box_scale: 1000                 # grounding 坐标归一化上限, Qwen-VL 系列用 1000
+negative_ratio_target: 0.30     # normal 样本占比下限
+qa_per_anomaly_target: 25000    # 每个异常类的 QA 条数目标
 
 classes:
   - id: normal
     zh: 正常
+    enabled: true
     cues: ["无成规模目标聚集", "无烟火", "无越界行为"]
 
   - id: massing
-    zh: 兵力集结
-    cues: ["同类目标密集成簇", "规则排列/列阵", "开阔地带集中停放"]
-    rule:
-      kind: density_cluster
-      target_classes: ["vehicle", "large-vehicle", "tank", "truck", "plane", "helicopter"]
-      min_cluster_size: 8         # 簇内目标数下限
-      eps_ratio: 0.06             # 邻域半径 = eps_ratio * 图像对角线
+    zh: 异常聚集
+    enabled: true
+    cues: ["目标密集成簇", "规则排列/列阵", "开阔地带集中"]
+    subtypes:
+      # 人员: 不要求军事身份 —— 航拍视角无法分辨军装与便装,
+      # 且禁区周边大规模人员聚集本身即为需上报的异常
+      - name: personnel
+        zh: 人员聚集
+        rule:
+          kind: density_cluster
+          target_classes: ["person", "pedestrian", "people", "soldier", "head"]
+          min_cluster_size: 20
+          eps_ratio: 0.04
+      # 装备: 必须含军事目标。纯民用车辆聚集(停车场/卡车场)是最大错标源,
+      # 命中规模但不含军事目标者标为 hard_negative, 作为困难负样本
+      - name: equipment
+        zh: 装备集结
+        rule:
+          kind: density_cluster
+          target_classes: ["vehicle", "large-vehicle", "truck", "car", "tank",
+                           "plane", "helicopter", "aircraft", "ship", "vessel"]
+          min_cluster_size: 8
+          eps_ratio: 0.06
+          require_any: ["tank", "military-vehicle", "military-truck", "militarycar",
+                        "armored", "plane", "helicopter", "aircraft", "warship"]
+          on_require_fail: hard_negative
 
-  - id: crowd_gathering
-    zh: 人员聚集
-    cues: ["人头密度骤增", "成团分布", "非常态集会"]
+  - id: explosion
+    zh: 爆炸/火光
+    enabled: true
+    cues: ["强亮斑与火球", "扬尘与碎片扩散", "瞬时高对比亮区"]
+    rule: {kind: label_transfer, from_labels: ["Explosion", "fire", "Arson", "Riot"]}
+
+  - id: smoke
+    zh: 烟雾
+    enabled: true
+    cues: ["烟柱", "灰白扩散团", "烟幕遮蔽地表"]
+    rule: {kind: label_transfer, from_labels: ["smoke", "Smoke", "fire"]}
+
+  - id: border_crossing
+    zh: 越界移动
+    enabled: true
+    cues: ["目标轨迹跨越边界线", "进入禁入区域", "由界外向界内移动"]
     rule:
-      kind: density_cluster
-      target_classes: ["person", "pedestrian", "people", "soldier", "head"]
-      min_cluster_size: 20
-      eps_ratio: 0.04
+      kind: boundary_cross
+      target_classes: ["person", "vehicle", "soldier", "truck"]
+      min_displacement_ratio: 0.02   # 相对图像对角线的最小位移, 过滤抖动
+
+  # ---------------------------------------------------------------- 已停用
+  # 恢复方式: enabled 改 true。但请先确认数据量能支撑 25,000 条 QA(约 2,800 张图)。
+
+  - id: fortification
+    zh: 阵地/工事构筑
+    enabled: false
+    # 停用原因: ERA constructing 抽帧去重后仅约 300 张可用图, 差 9 倍;
+    # 公开数据中掩体/壕沟/火炮阵地影像基本为零; 判定本质需要同一地点的
+    # 多时相对比, 而现有数据源全为单时相。需真实内部影像或 ARMA3 合成才可开启。
+    cues: ["新增土方与壕沟", "掩体轮廓", "工程机械作业"]
+    rule: {kind: label_transfer, from_labels: ["constructing", "excavator"]}
 
   - id: convoy
     zh: 车队机动
+    enabled: false
+    # 停用原因: 与正常道路交通无法可靠区分, 概念边界不清晰。
+    # 车辆的运动状态已作为 moving 属性保留在目标标注中。
     cues: ["车辆沿道路线性排列", "同向运动", "间距均匀"]
     rule:
       kind: linear_formation
@@ -38,43 +92,25 @@ classes:
       min_count: 5
       collinearity_r2: 0.90
 
-  - id: explosion
-    zh: 爆炸/火光
-    cues: ["强亮斑与火球", "扬尘与碎片扩散", "瞬时高对比亮区"]
-    rule: {kind: label_transfer, from_labels: ["Explosion", "fire", "Arson", "Riot"]}
-
-  - id: smoke
-    zh: 烟雾
-    cues: ["烟柱", "灰白扩散团", "烟幕遮蔽地表"]
-    rule: {kind: label_transfer, from_labels: ["smoke", "Smoke", "fire"]}
-
-  - id: border_crossing
-    zh: 越界移动
-    cues: ["目标轨迹跨越边界线", "进入禁入区域", "由界外向界内移动"]
-    rule:
-      kind: boundary_cross
-      target_classes: ["person", "vehicle", "soldier", "truck"]
-      min_displacement_ratio: 0.02   # 相对图像对角线的最小位移, 过滤抖动
-
-  - id: fortification
-    zh: 阵地/工事构筑
-    cues: ["新增土方与壕沟", "掩体轮廓", "工程机械作业"]
-    rule: {kind: label_transfer, from_labels: ["constructing", "excavator"]}
-
-  - id: air_activity
-    zh: 航空活动异常
-    cues: ["停机坪飞机数量异常", "直升机起降", "机群列队"]
-    rule:
-      kind: density_cluster
-      target_classes: ["plane", "helicopter", "aircraft", "fixed-wing-aircraft"]
-      min_cluster_size: 6
-      eps_ratio: 0.10
-
   - id: naval_massing
     zh: 舰船集结
+    enabled: false
+    # 停用原因: DOTA/FAIR1M 的 ship 绝大多数是民用港口, 错标风险高。
+    # 军用舰船集结已并入 massing/equipment 的 require_any(warship)。
     cues: ["港口舰船密集停泊", "海上编队航行"]
     rule:
       kind: density_cluster
       target_classes: ["ship", "vessel", "maritime-vessel", "warship"]
       min_cluster_size: 6
       eps_ratio: 0.08
+
+  - id: air_activity
+    zh: 航空活动异常
+    enabled: false
+    # 停用原因: 与 massing/equipment 重叠, 机群集结已由后者覆盖。
+    cues: ["停机坪飞机数量异常", "直升机起降", "机群列队"]
+    rule:
+      kind: density_cluster
+      target_classes: ["plane", "helicopter", "aircraft", "fixed-wing-aircraft"]
+      min_cluster_size: 6
+      eps_ratio: 0.10

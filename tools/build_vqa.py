@@ -74,7 +74,8 @@ class QABuilder:
         self.onto = ontology
         self.zh = {c["id"]: c["zh"] for c in ontology["classes"]}
         self.cues = {c["id"]: c.get("cues", []) for c in ontology["classes"]}
-        self.all_ids = [c["id"] for c in ontology["classes"] if c["id"] != "normal"]
+        self.all_ids = [c["id"] for c in ontology["classes"]
+                        if c["id"] != "normal" and c.get("enabled", True)]
         self.rng = random.Random(seed)
 
     # -------------------------------------------------- 单题型

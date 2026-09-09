@@ -99,7 +99,10 @@ def build_facts(scene: Scene, onto: dict[str, Any], max_objects: int = 30) -> di
         "regions": [{"name": r.name, "type": r.type} for r in scene.regions],
         "source_caption": scene.caption,
         "absent_anomaly_types": [c["id"] for c in onto["classes"]
-                                 if c["id"] != "normal" and c["id"] not in {e.type for e in scene.events}],
+                                 if c["id"] != "normal" and c.get("enabled", True)
+                                 and c["id"] not in {e.type for e in scene.events}],
+        "hard_negative": bool(scene.meta.get("hard_negative")),
+        "hard_negative_reason": scene.meta.get("hard_negative_reason", []),
     }
 
 

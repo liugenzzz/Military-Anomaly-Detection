@@ -28,7 +28,7 @@
   "messages": [
    {
     "role": "user",
-    "content": "<image>请识别图中异常活动的类型。\n候选：人员聚集、舰船集结、阵地/工事构筑、越界移动"
+    "content": "<image>这属于什么性质的异常事件？\n候选：异常聚集、越界移动、爆炸/火光"
    },
    {
     "role": "assistant",
@@ -203,11 +203,11 @@
   "messages": [
    {
     "role": "user",
-    "content": "<image>画面中是否出现了爆炸/火光？"
+    "content": "<image>画面中是否出现了烟雾？"
    },
    {
     "role": "assistant",
-    "content": "否。画面中未观察到爆炸/火光的迹象。"
+    "content": "否。画面中未观察到烟雾的迹象。"
    }
   ],
   "images": [
