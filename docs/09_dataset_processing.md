@@ -70,7 +70,11 @@ MAR20 的 20 个类别名是 `A1`..`A20`（机型代号），**全部是军机**
 
 **Roboflow 镜像版**：目录是 `train/valid/test` 三段、文件名带 `.rf.<hash>` 后缀，适配器会递归查找，不用改目录结构；YOLO 版的类名写在 `data.yaml` 里，会自动读取，不必手动给 `--classes`。
 
-⚠️ **下载前务必检查该 version 的 Preprocessing**：Roboflow 常见的默认预处理是 Resize 到 640×640。MAR20 是高分辨率遥感图，飞机本来只占几十像素，压到 640 之后小目标基本糊掉，不适合用于 grounding 训练。挑 Preprocessing 里没有 Resize、Augmentation 显示 `No augmentations applied` 的版本；若所有版本都做了 resize，改用官方原版 <https://gcheng-nwpu.github.io/>。增强版本还会把一张图复制成多张，图片数虚高但信息量没涨，且污染去重统计。
+**版本选择（已核对该镜像的三个版本）**：v1(3842 图, 640×640 Stretch)、v2(9222 图, 640×640 Stretch)、**v3(9222 图, 无 resize) ← 选这个**。唯一重要的标准是有没有 Resize——MAR20 是高分辨率遥感图、飞机只占几十像素，压到 640×640 后小目标糊掉，不能用于 grounding。若所有版本都做了 resize，改用官方原版 <https://gcheng-nwpu.github.io/>。
+
+**Roboflow 增强副本默认折叠**：v3 的 9222 = 原始 3842 中 train 那 2690 张各增强 3 份（8070 + valid 768 + test 384）。增强副本共享 `.rf.` 之前的文件名前缀，适配器据此精确还原到源图集合，并用该基名作为 `image_id`，避免同一源图的副本分散到 train/test 两侧造成指标虚高。这比按图像哈希去重可靠——dHash 对水平翻转不是不变的，抓不到翻转副本。想保留增强用 `--keep-augmented`。
+
+适配器另会检查图像尺寸，若全部为 640×640 则告警提示该版本做过 Resize。
 
 ### 3. FASDD_UAV —— 取 COCO 子目录
 
