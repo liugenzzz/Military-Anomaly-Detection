@@ -33,7 +33,8 @@
 指令型 QA 的生成与防幻觉设计见 [docs/05_instruction_design.md](docs/05_instruction_design.md)；
 **最终选定哪 8 个源数据集、不选哪些、以及框架选型，见 [docs/06_final_selection.md](docs/06_final_selection.md)**；
 **这 8 个的下载地址与下载顺序见 [docs/07_download_list.md](docs/07_download_list.md)**；
-**异常类型定稿（4 类 + 正常，每类 25000 条）与各类数据缺口见 [docs/08_task_types.md](docs/08_task_types.md)**。
+**异常类型定稿（4 类 + 正常，每类 25000 条）与各类数据缺口见 [docs/08_task_types.md](docs/08_task_types.md)**；
+**9 个数据集各自的处理方式、命令与坑见 [docs/09_dataset_processing.md](docs/09_dataset_processing.md)**。
 
 ## 快速开始
 
@@ -89,7 +90,9 @@ configs/ontology.yaml              异常本体(10 类) + 自动判定规则参�
 configs/qwen2_5vl_lora_sft.yaml    LLaMA-Factory 训练配置示例
 configs/prompts/                   system / 质检 / 生成 / 校验 四份 prompt 模板
 tools/scene.py                     统一中间表示
-tools/adapters.py                  各公开数据集 → Scene
+tools/prepare.py                   数据集预处理统一入口(9 个数据集各一个子命令)
+tools/ds/                          每个数据集的专用适配器 + 共享工具
+tools/adapters.py                  通用适配器(COCO/YOLO/分类目录) + demo 生成器
 tools/derive_events.py             规则派生异常事件标签
 tools/screen.py                    质量筛选闸1-4 + 合并闸5 VLM 复核结果
 tools/build_vqa.py                 Scene → 9 类题型规则 VQA

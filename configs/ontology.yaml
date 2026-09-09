@@ -7,8 +7,10 @@
 #     而是标为 hard_negative 困难负样本(避免把停车场训成装甲集群)
 #   - 人员聚集不设军事身份要求: 航拍视角分辨不出军装, 该约束不可实现
 #   - 停用的类别保留在文件末尾(enabled: false), 便于日后一行恢复
+#   - v0.2.1: 军用/民用目标分开命名(military-plane vs civil-plane),
+#     民用机场机群与民用港口因此成为困难负样本而非误标为集结
 
-version: "0.2.0"
+version: "0.2.2"
 box_scale: 1000                 # grounding 坐标归一化上限, Qwen-VL 系列用 1000
 negative_ratio_target: 0.30     # normal 样本占比下限
 qa_per_anomaly_target: 25000    # 每个异常类的 QA 条数目标
@@ -33,6 +35,7 @@ classes:
           target_classes: ["person", "pedestrian", "people", "soldier", "head"]
           min_cluster_size: 20
           eps_ratio: 0.04
+          eps_obj_mult: 3.0        # 邻域半径下限 = 3 倍目标尺寸, 使判定不随裁剪尺寸漂移
       # 装备: 必须含军事目标。纯民用车辆聚集(停车场/卡车场)是最大错标源,
       # 命中规模但不含军事目标者标为 hard_negative, 作为困难负样本
       - name: equipment
@@ -40,11 +43,17 @@ classes:
         rule:
           kind: density_cluster
           target_classes: ["vehicle", "large-vehicle", "truck", "car", "tank",
-                           "plane", "helicopter", "aircraft", "ship", "vessel"]
+                           "military-vehicle", "military-truck", "armored",
+                           "civil-plane", "military-plane", "civil-helicopter",
+                           "military-helicopter", "ship", "warship"]
           min_cluster_size: 8
           eps_ratio: 0.06
-          require_any: ["tank", "military-vehicle", "military-truck", "militarycar",
-                        "armored", "plane", "helicopter", "aircraft", "warship"]
+          eps_obj_mult: 3.0        # 同上; DOTA 切片后图像变小, 只按对角线取会漏判
+          # 军用与民用必须分开命名。MAR20 的飞机全是军机, DOTA 的 plane 含民航客机;
+          # 若都叫 plane, 民用机场停机坪会被判成装备集结。同理 DOTA 的 ship
+          # 多为民用港口, 只有 warship 才计入。
+          require_any: ["tank", "military-vehicle", "military-truck", "armored",
+                        "military-plane", "military-helicopter", "warship"]
           on_require_fail: hard_negative
 
   - id: explosion

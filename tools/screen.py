@@ -125,37 +125,50 @@ def hamming(a: int, b: int) -> int:
 
 
 def gate3_dedup(items: list[tuple[Scene, dict[str, Any] | None]],
-                threshold: int = DHASH_THRESHOLD) -> set[str]:
-    """跨数据集统一去重, 返回应丢弃的 image_id 集合。同簇保留最清晰的一张。
+                threshold: int = DHASH_THRESHOLD) -> set[int]:
+    """跨数据集统一去重, 返回应丢弃的**下标**集合。同簇保留最清晰的一张。
+
+    返回下标而非 image_id: 按 id 记录时, 若两个 scene 共享同一个 id, 会把本该
+    保留的那一个也一起丢掉(id 在集合里, 两份都命中)。
 
     先按 dhash 高 16 位分桶再桶内两两比, 避免 O(n^2) 全量比较。
     """
-    buckets: dict[int, list[tuple[Scene, dict]]] = defaultdict(list)
-    for s, st in items:
+    buckets: dict[int, list[int]] = defaultdict(list)
+    for idx, (_, st) in enumerate(items):
         if st and "dhash" in st:
-            buckets[st["dhash"] >> 48].append((s, st))
+            buckets[st["dhash"] >> 48].append(idx)
 
-    drop: set[str] = set()
-    for group in buckets.values():
-        used = set()
-        for i in range(len(group)):
+    drop: set[int] = set()
+    for idxs in buckets.values():
+        used: set[int] = set()
+        for a, i in enumerate(idxs):
             if i in used:
                 continue
             cluster = [i]
-            for j in range(i + 1, len(group)):
-                if j not in used and hamming(group[i][1]["dhash"], group[j][1]["dhash"]) <= threshold:
+            for j in idxs[a + 1:]:
+                if j not in used and hamming(items[i][1]["dhash"], items[j][1]["dhash"]) <= threshold:
                     cluster.append(j)
                     used.add(j)
             if len(cluster) > 1:
-                best = max(cluster, key=lambda k: group[k][1].get("blur", 0))
-                for k in cluster:
-                    if k != best:
-                        drop.add(group[k][0].image_id)
+                best = max(cluster, key=lambda k: items[k][1].get("blur", 0))
+                drop.update(k for k in cluster if k != best)
     return drop
 
 
 # ------------------------------------------------------------ 闸4/5
 VALID_VIEWS = {"uav", "satellite", "cctv"}
+
+
+def _split_duplicate_ids(scenes: list[Scene], seen: set[str]) -> tuple[list[Scene], list[Scene]]:
+    uniq, dup = [], []
+    for s in scenes:
+        if s.image_id in seen:
+            s.meta["drop_reason"] = "duplicate_scene_id"
+            dup.append(s)
+        else:
+            seen.add(s.image_id)
+            uniq.append(s)
+    return uniq, dup
 
 
 def gate4(scene: Scene) -> str | None:
@@ -206,11 +219,22 @@ def main() -> None:
                 reviews[r["image_id"]] = r
 
     scenes = load_scenes(args.scenes)
+
+    # 先处理重复 image_id: 合并多个 jsonl 时把同一个文件 cat 了两次是常见操作失误,
+    # 单独给出原因比让它混进近重复统计里更容易定位
+    seen_ids: set[str] = set()
+    scenes, dup_id_scenes = _split_duplicate_ids(scenes, seen_ids)
+    if dup_id_scenes:
+        print(f"[warn] 发现 {len(dup_id_scenes)} 个重复的 image_id, 已剔除。"
+              f"常见原因: 合并 jsonl 时重复包含了同一个文件")
+
     if not HAS_PIL:
         print("[warn] 未安装 Pillow, 闸1/闸3 的像素级检查将被跳过。pip install Pillow")
 
-    kept, dropped = [], []
+    kept, dropped = [], list(dup_id_scenes)
     reasons, warn_counter = Counter(), Counter()
+    if dup_id_scenes:
+        reasons["duplicate_scene_id"] = len(dup_id_scenes)
     by_ds_total, by_ds_kept = Counter(), Counter()
     staged: list[tuple[Scene, dict | None]] = []
 
@@ -237,13 +261,16 @@ def main() -> None:
 
     if not args.no_dedup:
         dup = gate3_dedup(staged, args.dedup_threshold)
-        for s, _ in staged:
-            if s.image_id in dup:
+        for i, (s, _) in enumerate(staged):
+            if i in dup:
                 s.meta["drop_reason"] = "near_duplicate"
                 reasons["near_duplicate"] += 1
                 dropped.append(s)
             else:
                 kept.append(s)
+        if staged and len(dup) / len(staged) > 0.30:
+            print(f"[warn] 近重复剔除率 {len(dup) / len(staged):.0%} 偏高。抽帧数据本就多近重复"
+                  f"属正常; 若整图数据集也如此, 请调大 --dedup-threshold 或核对是否重复合并")
     else:
         kept = [s for s, _ in staged]
 

@@ -1,2 +1,8 @@
 PyYAML>=6.0
-Pillow>=10.0.0        # 图像质量筛选(闸1)与近重复去除(闸3)必需
+Pillow>=10.0.0        # 图像质量筛选(闸1)、近重复去除(闸3)、DOTA 切片, 必需
+
+# --- 以下按需安装 ---
+# opencv-python       # 视频抽帧的备选方案(ERA / UCF-Crime / XD-Violence)。
+#                     # 更推荐装 ffmpeg: apt-get install -y ffmpeg, 更快更稳
+# scipy               # 仅当 DroneCrowd 拿到的是 .mat 标注时需要
+# numpy               # 仅当 Drone-Anomaly 的帧级标签是 .npy 时需要

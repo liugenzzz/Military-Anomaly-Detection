@@ -51,6 +51,27 @@ def _union_find_cluster(points: list[tuple[float, float]], eps: float) -> list[l
     return list(groups.values())
 
 
+# 公开别名: DOTA 切片需要在原图坐标上先聚类, 避免把一个簇切散
+union_find_cluster = _union_find_cluster
+
+
+def cluster_eps(objs: list[Obj], diag: float, rule: dict[str, Any]) -> float:
+    """邻域半径 = max(图像对角线比例, 目标尺寸倍数)。
+
+    只按图像对角线取会导致**尺度依赖**: 同一片机群, 在 2400x1600 原图上间距
+    90px 能连通, 裁成 1024x1024 切片后对角线变小、阈值收缩到 87px 就连不上了。
+    加一条"目标尺寸的若干倍"作为下限, 判定就与裁剪尺寸无关 —— 相邻的物理含义
+    本来就是"间距不超过目标本身的几倍", 而不是"占画幅的百分之几"。
+    """
+    eps = rule.get("eps_ratio", 0.06) * diag
+    mult = rule.get("eps_obj_mult")
+    if mult and objs:
+        sizes = sorted(max(o.bbox[2] - o.bbox[0], o.bbox[3] - o.bbox[1]) for o in objs)
+        median = sizes[len(sizes) // 2]
+        eps = max(eps, mult * median)
+    return eps
+
+
 def derive_density_cluster(scene: Scene, rule: dict[str, Any], cls_id: str,
                           subtype: str | None = None) -> list[Event]:
     """密度聚类派生聚集事件。
@@ -66,7 +87,7 @@ def derive_density_cluster(scene: Scene, rule: dict[str, Any], cls_id: str,
 
     require = {c.lower() for c in rule.get("require_any", [])}
     on_fail = rule.get("on_require_fail")
-    eps = rule["eps_ratio"] * scene.diag
+    eps = cluster_eps(objs, scene.diag, rule)
     centers = [o.center for o in objs]
     events = []
     for group in _union_find_cluster(centers, eps):
