@@ -24,6 +24,7 @@ def main() -> None:
     problems: list[str] = []
     qa_types, anomalies, sources = Counter(), Counter(), Counter()
     styles, turns = Counter(), Counter()
+    facets, gens, imgs = Counter(), Counter(), Counter()
     total = 0
     missing = set()
 
@@ -54,11 +55,15 @@ def main() -> None:
                     if not Path(im).exists():
                         missing.add(im)
             ex = s.get("extra", {})
-            qa_types[ex.get("qa_type", "?")] += 1
+            qa_types[ex.get("task", ex.get("qa_type", "?"))] += 1
+            if ex.get("facet"):
+                facets[ex["facet"]] += 1
+            gens[ex.get("gen", "-")] += 1
+            imgs[ex.get("n_images", 1)] += 1
             for a in (ex.get("anomaly") or ["?"]):
                 anomalies[a] += 1
             sources[ex.get("source_dataset", "?")] += 1
-            styles[ex.get("instruction_style", "-")] += 1
+
 
     def show(title: str, c: Counter) -> None:
         print(f"\n{title}")
@@ -69,9 +74,12 @@ def main() -> None:
     show("题型分布", qa_types)
     show("异常类别分布", anomalies)
     show("数据来源分布", sources)
-    if len(styles) > 1:
-        show("指令风格分布", styles)
+    if facets:
+        show("描述侧面分布", facets)
+    show("生成方式", Counter({"规则" if k == "rule" else ("LLM" if k == "llm" else k): v
+                              for k, v in gens.items()}))
     show("对话轮数分布", Counter({f"{k} 轮": v for k, v in turns.items()}))
+    show("图片数分布", Counter({f"{k} 图": v for k, v in imgs.items()}))
 
     neg = anomalies.get("normal", 0) / max(1, total)
     print(f"\n正常(负)样本占比 {neg:.1%}  阈值 {args.min_negative_ratio:.0%}"

@@ -20,7 +20,9 @@ import base64
 import hashlib
 import json
 import os
+import random
 import re
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -28,11 +30,54 @@ from typing import Any
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ds.boxes import BBOX_SCALE, COORD_MODE
+from facets import Facet, load_all, load_tool
 from scene import Scene, load_scenes
 
-DEFAULT_QA_TYPES = ("judgement", "classification", "counting", "grounding",
-                    "attribute", "spatial", "description", "reasoning", "negation")
-BOX_SCALE = 1000
+# 描述侧面的抽取权重。**position 不在其中** —— 方位表述由 build_vqa 的
+# locate_verbal 用规则精确生成, 零幻觉且免费, 没必要再花 LLM 算力重做一遍。
+FACET_WEIGHTS = {
+    "evidence": 25, "full": 8,
+    # 各类专属侧面, 顺序即权重 18/18/15/12
+    "formation": 18, "composition": 18, "scale": 15, "site": 12,
+    "intensity": 18, "debris": 18, "extent": 15, "stage": 12,
+    "morphology": 18, "color": 18, "drift": 15, "occlusion": 12,
+    "trajectory": 18, "timing": 18, "boundary_relation": 15, "group": 12,
+    "hard_neg": 40, "scan": 30,
+}
+SKIP_FACETS = {"position"}
+BOX_SCALE = BBOX_SCALE
+
+
+def facet_applicable(kind: str, s: Scene) -> bool:
+    """needs 前置条件的机器可判部分。判不了的交给模型自己返回空。"""
+    ev = {e.type: e for e in s.events}
+    cluster = next((e for e in s.events if "cluster_bbox" in e.evidence), None)
+    n_frames = len(s.meta.get("frames", [])) or 1
+    crossed = [e for e in s.events if e.evidence.get("rule") == "boundary_cross"]
+    return {
+        "formation": bool(cluster and cluster.evidence.get("count", 0) >= 6),
+        "composition": len(s.objects) > 0,
+        "scale": cluster is not None,
+        "site": True,
+        "intensity": "explosion" in ev,
+        "debris": "explosion" in ev,
+        "extent": "explosion" in ev,
+        "stage": "explosion" in ev,
+        "morphology": "smoke" in ev,
+        "color": "smoke" in ev,
+        "drift": "smoke" in ev,
+        "occlusion": "smoke" in ev,
+        "trajectory": n_frames > 1 and bool(crossed),
+        "timing": n_frames > 1 and bool(crossed),
+        "boundary_relation": bool(crossed) and bool(s.regions),
+        "group": len(crossed) >= 2,
+        "hard_neg": bool(s.meta.get("hard_negative")),
+        "scan": not s.events,
+        "evidence": bool(s.events),
+        "full": True,
+    }.get(kind, True)
 
 
 # ---------------------------------------------------------------- FACTS
@@ -206,8 +251,8 @@ def load_scenes_excluding(path: str, exclude_file: str | None) -> list[Scene]:
     return kept
 
 
-def cmd_review(args, onto):
-    tmpl = load_prompt("review_image.txt", args.prompt_dir)
+def cmd_screen(args, onto):
+    tmpl = load_prompt("screen_image.txt", args.prompt_dir + "/_tools")
     scenes = load_scenes_excluding(args.scenes, args.exclude_ids)
     zh = {c["id"]: c["zh"] for c in onto["classes"]}
 
@@ -232,19 +277,98 @@ def cmd_review(args, onto):
     _run_and_write(reqs, run, args.out, args.workers)
 
 
-def cmd_generate(args, onto):
-    tmpl = load_prompt("generate_qa.txt", args.prompt_dir)
-    scenes = load_scenes_excluding(args.scenes, args.exclude_ids)
-    qa_types = ", ".join(args.qa_types or DEFAULT_QA_TYPES)
+# 描述侧面只需要"数了多少、有什么事件", 不需要每个目标的坐标。
+# **坐标出现在 FACTS 里会诱导模型把坐标写进答案**, 而描述题恰恰禁止输出坐标 ——
+# 与其生成完再靠 must-not 拦, 不如一开始就不给它看。
+FACTS_KEEP_BOXES = {"reason"}
 
-    reqs = []
+
+def trim_facts(facts: dict[str, Any], facet: str) -> dict[str, Any]:
+    """按侧面裁剪事实包: 描述类去掉逐目标坐标, 只留汇总与事件。"""
+    if facet in FACTS_KEEP_BOXES:
+        return facts
+    out = {k: v for k, v in facts.items()
+           if k not in ("objects", "coordinate_note", "objects_truncated")}
+    evs = []
+    for e in out.get("events", []):
+        evs.append({k: v for k, v in e.items() if k != "region_box_1000"})
+    if evs:
+        out["events"] = evs
+    return out
+
+
+def _pick_facets(s: Scene, facets: dict[str, list[Facet]], anomaly: str,
+                 rng: random.Random, k: int) -> list[Facet]:
+    """按权重抽 k 个适用的侧面。不适用的直接排除, 不浪费一次调用。"""
+    pool = [f for f in facets.get(anomaly, [])
+            if f.kind not in SKIP_FACETS and facet_applicable(f.kind, s)]
+    if not pool:
+        return []
+    # 至少留一个不抽: 正常图的可用侧面本来就少(scan/hard_neg/full),
+    # 每次都抽干会让 full 这种"什么图都能出"的侧面占比虚高。
+    # 异常图的池子有 6 个侧面, 这条限制不影响把 facets-per-image 开到 4~5。
+    k = min(k, max(1, len(pool) - 1))
+    picked: list[Facet] = []
+    for _ in range(k):
+        rest = [f for f in pool if f not in picked]
+        w = [FACET_WEIGHTS.get(f.kind, 10) for f in rest]
+        picked.append(rng.choices(rest, weights=w)[0])
+    return picked
+
+
+def cmd_generate(args, onto):
+    tmpl = load_prompt("describe_gen.txt", args.prompt_dir + "/_tools")
+    reason_tmpl = load_prompt("reason_gen.txt", args.prompt_dir + "/_tools")
+    facets, _ = load_all(args.prompt_dir)
+    zh = {c["id"]: c["zh"] for c in onto["classes"]}
+    scenes = load_scenes_excluding(args.scenes, args.exclude_ids)
+    rng = random.Random(args.seed)
+
+    reqs: list[dict] = []
+    n_skip = 0
     for s in scenes:
+        anomaly = (s.anomaly_types or ["normal"])[0]
         facts = build_facts(s, onto, args.max_objects)
-        reqs.append({"image_id": s.image_id, "image_path": s.image_path,
-                     "facts": facts,
-                     "source_dataset": s.source_dataset, "license": s.license,
-                     "prompt": tmpl.format(facts=json.dumps(facts, ensure_ascii=False, indent=1),
-                                           n_items=args.n_items, qa_types=qa_types)})
+        picked = _pick_facets(s, facets, anomaly, rng, args.facets_per_image)
+        if not picked:
+            n_skip += 1
+        for fa in picked:
+            q = rng.choice(fa.q_bank).replace("{zh}", zh.get(anomaly, "异常"))
+            bans = fa.bans_for(anomaly)
+            facts_str = json.dumps(trim_facts(facts, fa.kind), ensure_ascii=False, indent=1)
+            reqs.append({
+                "image_id": s.image_id, "image_path": s.image_path,
+                "images": s.meta.get("frames") or [s.image_path],
+                "kind": "describe", "facet": fa.kind, "anomaly": anomaly,
+                "question": q, "must_not": bans, "facts": facts,
+                "source_dataset": s.source_dataset, "license": s.license,
+                "width": s.width, "height": s.height,
+                "prompt": tmpl.format(
+                    facts=facts_str, kind=fa.kind,
+                    kind_zh=fa.meta.get("zh", fa.kind),
+                    answer_spec=fa.answer_spec,
+                    q_example=fa.q_example or (fa.q_bank[0] if fa.q_bank else q),
+                    a_example=fa.example_for(anomaly),
+                    question=q, must_not="、".join(bans) or "（无）"),
+            })
+        # 推理题: 有事件或困难负样本的图才出
+        if (s.events or s.meta.get("hard_negative")) and rng.random() < args.reason_ratio:
+            _, asks = load_all(args.prompt_dir)
+            rq = rng.choice(asks["reason"].lines).replace("{zh}", zh.get(anomaly, "异常"))
+            reqs.append({
+                "image_id": s.image_id, "image_path": s.image_path,
+                "images": s.meta.get("frames") or [s.image_path],
+                "kind": "reason", "facet": "reason", "anomaly": anomaly,
+                "question": rq, "must_not": [], "facts": facts,
+                "source_dataset": s.source_dataset, "license": s.license,
+                "width": s.width, "height": s.height,
+                "prompt": reason_tmpl.format(
+                    facts=json.dumps(trim_facts(facts, "reason"), ensure_ascii=False, indent=1),
+                    question=rq),
+            })
+
+    if n_skip:
+        print(f"[{n_skip}] 个 scene 没有适用的侧面, 已跳过")
     if args.dry_run:
         _write_requests(reqs, args.out)
         return
@@ -253,76 +377,119 @@ def cmd_generate(args, onto):
 
     def run(r):
         msg = [{"role": "user", "content": image_message(r["prompt"], r["image_path"], args.inline_images)}]
-        d = parse_json(llm.chat(msg)) or {"items": []}
-        return {"image_id": r["image_id"], "image_path": r["image_path"],
-                "facts": r["facts"], "source_dataset": r["source_dataset"],
-                "license": r["license"], "items": d.get("items", [])}
+        ans = llm.chat(msg, json_mode=False).strip().strip('"')
+        return {**{k: v for k, v in r.items() if k != "prompt"}, "answer": ans}
 
     _run_and_write(reqs, run, args.out, args.workers)
 
 
 def cmd_verify(args, onto):
-    tmpl = load_prompt("verify_qa.txt", args.prompt_dir)
-    system = load_prompt("system.txt", args.prompt_dir).strip()
-    records = [json.loads(ln) for ln in Path(args.generated).read_text(encoding="utf-8").splitlines() if ln.strip()]
+    """must-not 硬过滤 -> 六维 review -> 落盘 ShareGPT。
 
-    llm = None if args.no_verify else LLM(args.model, args.base_url,
-                                          cache_dir=args.cache_dir, temperature=0.0)
-    out, stats = [], {"pass": 0, "fix": 0, "drop": 0, "conflict": 0}
+    硬过滤放在 review 之前: 它是纯字符串检查, 零成本, 先把跑题的滤掉,
+    再花算力做 review。
+    """
+    system = (Path(args.prompt_dir) / "system.txt").read_text(encoding="utf-8").strip()
+    review_tmpl = load_prompt("review.txt", args.prompt_dir + "/_tools")
+    records = [json.loads(ln) for ln in
+               Path(args.generated).read_text(encoding="utf-8").splitlines() if ln.strip()]
 
-    for rec in records:
-        items = [it for it in rec.get("items", []) if not it.get("conflict")]
-        stats["conflict"] += len(rec.get("items", [])) - len(items)
-        if not items:
+    stat = {"total": len(records), "empty": 0, "must_not": 0, "no_facts": 0,
+            "pass": 0, "fail": 0}
+    kept: list[dict] = []
+    violations: dict[str, int] = {}
+
+    # ── 闸一: 纯规则硬过滤
+    for r in records:
+        ans = (r.get("answer") or "").strip()
+        if not ans or ans in {"空", '""', "null", "无"}:
+            stat["empty"] += 1
             continue
+        if bad := [w for w in r.get("must_not", []) if w and w in ans]:
+            stat["must_not"] += 1
+            for w in bad:
+                violations[w] = violations.get(w, 0) + 1
+            continue
+        if r["kind"] == "describe" and not r["facts"].get("events") \
+                and r["facet"] not in {"scan", "hard_neg", "full"} :
+            stat["no_facts"] += 1
+            continue
+        kept.append(r)
 
-        verdicts: dict[int, dict] = {}
-        if llm is not None:
-            brief = [{"index": i, "turns": it.get("turns", [])} for i, it in enumerate(items)]
-            prompt = tmpl.format(facts=json.dumps(rec["facts"], ensure_ascii=False, indent=1),
-                                 items=json.dumps(brief, ensure_ascii=False, indent=1))
-            d = parse_json(llm.chat([{"role": "user", "content": prompt}])) or {}
-            verdicts = {r["index"]: r for r in d.get("results", []) if "index" in r}
+    print(f"硬过滤: {stat['total']} -> {len(kept)}  "
+          f"(空 {stat['empty']} / 踩禁用词 {stat['must_not']} / 无事实支撑 {stat['no_facts']})")
+    if violations:
+        top = sorted(violations.items(), key=lambda kv: -kv[1])[:8]
+        print("  最常踩的禁用词:", "、".join(f"{w}×{n}" for w, n in top))
+        print("  —— 这些词属于别的侧面, 出现说明生成端跑题了, 频次高就该收紧对应的 answer-spec")
 
-        for i, it in enumerate(items):
-            v = verdicts.get(i, {"verdict": "pass"})
-            stats[v.get("verdict", "pass")] = stats.get(v.get("verdict", "pass"), 0) + 1
-            if v.get("verdict") == "drop":
+    # ── 闸二: 六维 review(按图分组, 一次审多条)
+    verdicts: dict[int, dict] = {}
+    if not args.no_verify and kept:
+        llm = LLM(args.model, args.base_url, cache_dir=args.cache_dir, temperature=0.0)
+        by_img: dict[str, list[int]] = {}
+        for i, r in enumerate(kept):
+            by_img.setdefault(r["image_id"], []).append(i)
+
+        def run(item):
+            _, idxs = item
+            batch = [{"id": j, "question": kept[j]["question"], "answer": kept[j]["answer"],
+                      "facet": kept[j]["facet"]} for j in idxs[:8]]
+            prompt = review_tmpl.format(width=kept[idxs[0]]["width"],
+                                        height=kept[idxs[0]]["height"],
+                                        samples=json.dumps(batch, ensure_ascii=False, indent=1))
+            msg = [{"role": "user", "content": image_message(
+                prompt, kept[idxs[0]]["image_path"], args.inline_images)}]
+            d = parse_json(llm.chat(msg)) or {}
+            return {r["id"]: r for r in d.get("reviews", []) if "id" in r}
+
+        with ThreadPoolExecutor(args.workers) as ex:
+            for got in ex.map(run, by_img.items()):
+                verdicts.update(got)
+
+    # ── 落盘
+    dims = ("correct", "grounded", "facet", "instruction", "needs_image", "no_overclaim")
+    out: list[dict] = []
+    dim_fail: dict[str, int] = {}
+    for i, r in enumerate(kept):
+        v = verdicts.get(i)
+        if v is not None:
+            low = [d for d in dims if v.get(d, 5) < args.min_score]
+            if low:
+                stat["fail"] += 1
+                for d in low:
+                    dim_fail[d] = dim_fail.get(d, 0) + 1
                 continue
-            turns = it.get("turns") or []
-            if not turns:
-                continue
-            if v.get("verdict") == "fix" and v.get("fixed_assistant"):
-                turns[-1]["assistant"] = v["fixed_assistant"]
-
-            messages = [{"role": "system", "content": system}]
-            for k, t in enumerate(turns):
-                user = t.get("user", "")
-                if k == 0 and "<image>" not in user:
-                    user = "<image>" + user
-                messages.append({"role": "user", "content": user})
-                messages.append({"role": "assistant", "content": t.get("assistant", "")})
-
-            out.append({
-                "messages": messages,
-                "images": [rec["image_path"]],
-                "extra": {"image_id": rec["image_id"],
-                          "qa_type": it.get("qa_type", "unknown"),
-                          "instruction_style": it.get("instruction_style", "direct"),
-                          "anomaly": [e["type"] for e in rec["facts"].get("events", [])] or ["normal"],
-                          "source_dataset": rec.get("source_dataset", "unknown"),
-                          "license": rec.get("license", "unknown"),
-                          "verified": v.get("verdict", "pass")},
-            })
+        stat["pass"] += 1
+        n_img = len(r["images"])
+        out.append({
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": "<image>" * n_img + r["question"]},
+                         {"role": "assistant", "content": r["answer"]}],
+            "images": r["images"],
+            "extra": {"image_id": r["image_id"], "task": r["kind"], "facet": r["facet"],
+                      "gen": "llm", "n_turns": 1, "n_images": n_img,
+                      "anomaly": [r["anomaly"]],
+                      "source_dataset": r["source_dataset"], "license": r["license"],
+                      "image_width": r["width"], "image_height": r["height"],
+                      "coordinate_mode": COORD_MODE, "bbox_scale": BOX_SCALE,
+                      "review": v or "skipped"},
+        })
 
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
-    total = sum(v for k, v in stats.items() if k in ("pass", "fix", "drop"))
     print(f"落盘 {len(out)} 条 -> {args.out}")
-    print(f"  校验: pass={stats['pass']} fix={stats['fix']} drop={stats['drop']}"
-          f"  (drop 率 {stats['drop'] / max(1, total):.1%}), 生成端自报冲突 {stats['conflict']}")
-    if total and stats["drop"] / total > 0.15:
-        print("  [warn] drop 率超过 15%, 说明生成端在编造事实, 建议收紧 generate_qa.txt 的约束或降低 temperature")
+    if verdicts:
+        rate = stat["fail"] / max(1, stat["fail"] + stat["pass"])
+        print(f"  review: 通过 {stat['pass']} / 打回 {stat['fail']} (打回率 {rate:.1%})")
+        if dim_fail:
+            print("  打回原因:", "、".join(f"{k} {v}" for k, v in
+                                          sorted(dim_fail.items(), key=lambda kv: -kv[1])))
+        if rate > 0.15:
+            print("  [warn] 打回率超过 15%, 说明生成端在编造或跑题, "
+                  "建议收紧 answer-spec 或把 temperature 降到 0.5 以下")
+    from collections import Counter
+    print("  侧面分布:", dict(Counter(s["extra"]["facet"] for s in out).most_common()))
 
 
 def _write_requests(reqs: list[dict], out: str) -> None:
@@ -362,26 +529,32 @@ def main() -> None:
         p.add_argument("--exclude-ids", default=None,
                        help="golden set 的 image_id 清单, 必须排除否则泄漏(make_golden.py 产出)")
 
-    p = sub.add_parser("review", help="闸5 图像质检")
+    p = sub.add_parser("screen", help="闸5 图像质检")
     p.add_argument("--scenes", required=True); common(p)
 
-    p = sub.add_parser("generate", help="生成指令型 QA")
+    p = sub.add_parser("generate", help="按侧面生成描述与推理")
     p.add_argument("--scenes", required=True)
-    p.add_argument("--n-items", type=int, default=6)
+    p.add_argument("--facets-per-image", type=int, default=2,
+                   help="每张图抽几个描述侧面")
+    p.add_argument("--reason-ratio", type=float, default=0.35,
+                   help="有事件的图里出推理题的比例")
     p.add_argument("--max-objects", type=int, default=30)
-    p.add_argument("--temperature", type=float, default=0.8)
-    p.add_argument("--qa-types", nargs="*", default=None)
+    p.add_argument("--temperature", type=float, default=0.55,
+                   help="描述求准不求奇, 0.5~0.6 即可; 多样性靠侧面与问法池, 不靠高温")
+    p.add_argument("--seed", type=int, default=0)
     common(p)
 
-    p = sub.add_parser("verify", help="校验并落盘为 ShareGPT")
+    p = sub.add_parser("verify", help="must-not 硬过滤 + 六维 review + 落盘")
     p.add_argument("--generated", required=True)
-    p.add_argument("--no-verify", action="store_true", help="跳过校验直接落盘(不推荐)")
+    p.add_argument("--no-verify", action="store_true",
+                   help="跳过 LLM review, 只做硬过滤(调试用, 正式跑不要用)")
+    p.add_argument("--min-score", type=int, default=3, help="六维中任一维低于此值即打回")
     common(p)
 
     args = ap.parse_args()
     onto = yaml.safe_load(Path(args.ontology).read_text(encoding="utf-8"))
     globals()["BOX_SCALE"] = int(onto.get("box_scale", BOX_SCALE))
-    {"review": cmd_review, "generate": cmd_generate, "verify": cmd_verify}[args.cmd](args, onto)
+    {"screen": cmd_screen, "generate": cmd_generate, "verify": cmd_verify}[args.cmd](args, onto)
 
 
 if __name__ == "__main__":

@@ -18,11 +18,14 @@
         ↓  screen.py + llm_qa.py review     五道闸质量筛选，预期保留 65-75%
   干净的 Scene
         ↓
-  ┌── build_vqa.py   规则 QA (40%)  计数、grounding —— 答案是精确真值
-  └── llm_qa.py      LLM 指令 QA (60%)  描述、推理、多轮、JSON 输出
-        ↓  generate(t=0.8) → verify(t=0, 换模型) → pass/fix/drop
+  ┌── build_vqa.py   规则侧  判定 / 方位指代 / 坐标框 / 计数 —— 答案由标注唯一决定
+  └── llm_qa.py      LLM 侧  描述(21 个侧面) / 推理
+        ↓  generate → must-not 硬过滤(零成本, 先滤跑题的) → 六维 review
   LLaMA-Factory ShareGPT 指令数据
 ```
+
+**四类异常各用各的描述骨架**：聚集讲构型、爆炸讲亮度、烟雾讲形态走向、越界讲时序，
+每个侧面配 `must-not` 禁用词，答案里出现就整条丢——没有这道闸，跑几轮就会退化成同一种三段式。
 
 **LLM 只做语言表达，判断权在规则手里**：先用标注算出 FACTS 事实包（数量、坐标、事件），LLM 在事实约束下改写成多样化指令问答，再由另一个模型逐条校验。详见 [docs/05_instruction_design.md](docs/05_instruction_design.md)。
 
@@ -93,15 +96,20 @@ llamafactory-cli train configs/qwen2_5vl_lora_sft.yaml
 ```
 configs/ontology.yaml              异常本体(10 类) + 自动判定规则参数
 configs/qwen2_5vl_lora_sft.yaml    LLaMA-Factory 训练配置示例
-configs/prompts/                   system / 质检 / 生成 / 校验 四份 prompt 模板
+configs/prompts/                   33 份纯文本 prompt，与代码分离，服务器上可直接改
+  system.txt                       训练数据里的 system prompt
+  describe/<异常类>/<侧面>.txt      21 个描述侧面，各带 must-not 硬隔离与问法池
+  ask/*.txt                        判定/方位/坐标/计数/推理/否定的问法池
+  _tools/*.txt                     描述生成、推理生成、六维 review、图像质检
 tools/scene.py                     统一中间表示
 tools/prepare.py                   数据集预处理统一入口(9 个数据集各一个子命令)
 tools/ds/                          每个数据集的专用适配器 + 共享工具
 tools/adapters.py                  通用适配器(COCO/YOLO/分类目录) + demo 生成器
 tools/derive_events.py             规则派生异常事件标签
 tools/screen.py                    质量筛选闸1-4 + 合并闸5 VLM 复核结果
-tools/build_vqa.py                 Scene → 9 类题型规则 VQA
-tools/llm_qa.py                    FACTS 事实包 → LLM 指令型 VQA → 校验
+tools/facets.py                    侧面与问法池的加载 + 自检(--check)
+tools/build_vqa.py                 规则生成: 判定/方位指代/坐标框/计数 + 否定变体
+tools/llm_qa.py                    按侧面生成描述与推理 → must-not 硬过滤 → 六维 review
 tools/make_golden.py               自动构建 golden set(零人工) + 训练集排除清单
 tools/check_dataset.py             数据体检(路径/坐标/分布/风格/轮数/正负比)
 data/dataset_info.json             LLaMA-Factory 数据集注册

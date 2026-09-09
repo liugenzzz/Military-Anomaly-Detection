@@ -1,8 +1,9 @@
-"""从 Scene 生成多模态 VQA 样本(LLaMA-Factory ShareGPT 格式)。
+"""规则生成：判定 / 方位指代 / 坐标框 / 计数（含否定变体）。
 
-9 类题型: 判定 / 分类 / 计数 / 定位 / 属性 / 空间关系 / 描述 / 推理 / 否定拒答。
-其中前 6 类与第 9 类完全由标注规则生成, 事实一致性有保证;
-描述与推理题这里给出"带标注约束的骨架答案", 建议再送 VLM 润色(见 --emit-vlm-prompts)。
+这四类任务的答案**由标注唯一决定**，所以走规则不走 LLM —— 零成本、零幻觉。
+描述与推理需要自然语言，走 llm_qa.py。
+
+反同质化按 docs/14 的四维矩阵采样：轮数、图数、问法风格、答案形态。
 """
 from __future__ import annotations
 
@@ -16,211 +17,299 @@ from typing import Any
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ds.boxes import COORD_MODE, box_json  # noqa: E402
+from ds.boxes import BBOX_SCALE, COORD_MODE, box_json, boxes_json, to_bbox2d  # noqa: E402
+from facets import load_all, load_tool  # noqa: E402
 from scene import Obj, Scene, load_scenes  # noqa: E402
 
-BOX_SCALE = 1000       # grounding 坐标归一化上限; 换基座时只改这里
+# 任务配额(占该异常类总量)。描述与推理由 llm_qa 产出, 这里只列规则侧。
+RULE_QUOTA = {"judge": 0.15, "locate": 0.12, "count": 0.05}
+LOCATE_VERBAL_RATIO = 0.70      # 定位任务里方位指代占七成, 坐标占三成
+NEGATION_RATIO = 0.20           # 每类任务的否定变体占比
+TWO_TURN_RATIO = 0.30           # 规则侧的双轮占比
+
+MEASURE = {"military-plane": "架", "civil-plane": "架", "plane": "架",
+           "military-helicopter": "架", "civil-helicopter": "架", "helicopter": "架",
+           "tank": "辆", "vehicle": "辆", "large-vehicle": "辆", "truck": "辆",
+           "military-vehicle": "辆", "military-truck": "辆", "armored": "辆",
+           "person": "名", "soldier": "名", "drone": "架",
+           "ship": "艘", "warship": "艘"}
+CLS_ZH = {"military-plane": "军用飞机", "civil-plane": "民航飞机", "tank": "坦克",
+          "vehicle": "车辆", "large-vehicle": "大型车辆", "truck": "卡车",
+          "person": "人员", "soldier": "士兵", "ship": "船只", "warship": "军舰",
+          "drone": "无人机", "military-vehicle": "军用车辆", "fire": "火焰", "smoke": "烟雾"}
 
 
-# ---------------------------------------------------------------- 模板
-JUDGE_Q = [
-    "画面中是否存在异常军事活动？",
-    "这张航拍图里有没有值得警戒的异常情况？",
-    "请判断当前监控画面是否出现异常，并说明依据。",
-    "从态势感知角度看，该画面是否需要上报？",
-]
-CLASSIFY_Q = [
-    "画面中出现的异常属于哪一类？",
-    "请识别图中异常活动的类型。",
-    "这属于什么性质的异常事件？",
-]
-DESCRIBE_Q = [
-    "请描述这张画面中的情况。",
-    "用一段话概括画面的态势要点。",
-    "作为侦察情报，请对该画面进行简要描述。",
-]
-REASON_Q = {
-    "massing": "为什么判断画面中存在兵力集结？请给出判定依据。",
-    "crowd_gathering": "画面中的人员聚集有哪些可观察到的特征？",
-    "convoy": "为什么认为这是车队机动而不是普通停车？",
-    "border_crossing": "请说明越界行为的发生方向与判定依据。",
-    "explosion": "请说明判定为爆炸的视觉依据。",
-    "smoke": "画面中的烟雾有什么特征？可能意味着什么？",
-    "fortification": "画面中的施工痕迹说明了什么？",
-    "air_activity": "机场区域的活动是否异常？依据是什么？",
-    "naval_massing": "为什么判断存在舰船集结？",
-    "normal": "画面中为什么判定为无异常？",
-}
-DIRECTION_ZH = {"enter": "由外部进入禁区", "exit": "由禁区向外撤出",
-                "-1->1": "自边界线一侧越至另一侧", "1->-1": "自边界线一侧越至另一侧"}
+# ---------------------------------------------------------------- 方位表述
+_TENTH = ["", "一成", "两成", "三成", "四成", "五成", "六成", "七成", "八成", "九成"]
 
 
-def _norm_box(bbox: list[float], w: int, h: int) -> list[int]:
-    x1, y1, x2, y2 = bbox
-    return [max(0, min(BOX_SCALE, round(x1 / w * BOX_SCALE))),
-            max(0, min(BOX_SCALE, round(y1 / h * BOX_SCALE))),
-            max(0, min(BOX_SCALE, round(x2 / w * BOX_SCALE))),
-            max(0, min(BOX_SCALE, round(y2 / h * BOX_SCALE)))]
+def _frac(v: float) -> str:
+    """0~1 -> 自然的中文比例说法。"""
+    if v <= 0.06:
+        return "最左端" if v == 0 else "近左缘"
+    if v >= 0.94:
+        return "近右缘"
+    if abs(v - 0.5) < 0.04:
+        return "正中"
+    if abs(v - 1 / 3) < 0.04:
+        return "三分之一处"
+    if abs(v - 2 / 3) < 0.04:
+        return "三分之二处"
+    if abs(v - 0.25) < 0.04:
+        return "四分之一处"
+    if abs(v - 0.75) < 0.04:
+        return "四分之三处"
+    return _TENTH[max(1, min(9, round(v * 10)))]
 
 
-def _quadrant(obj: Obj, w: int, h: int) -> str:
-    cx, cy = obj.center
-    v = "上" if cy < h / 3 else ("下" if cy > h * 2 / 3 else "中")
-    hz = "左" if cx < w / 3 else ("右" if cx > w * 2 / 3 else "中")
-    if v == "中" and hz == "中":
+def _zone(cx: float, cy: float) -> str:
+    v = "上" if cy < 1 / 3 else ("下" if cy > 2 / 3 else "中")
+    h = "左" if cx < 1 / 3 else ("右" if cx > 2 / 3 else "中")
+    if v == "中" and h == "中":
         return "画面中央"
-    return f"画面{v}{hz}方"
+    if v == "中":
+        return f"画面{h}侧居中"
+    if h == "中":
+        return f"画面{v}部偏中"
+    return f"画面{v}{h}方" if (v, h) not in (("上", "左"), ("上", "右"), ("下", "左"), ("下", "右")) \
+        else f"画面{v}{h}角"
 
 
-class QABuilder:
-    def __init__(self, ontology: dict[str, Any], seed: int = 0):
-        self.onto = ontology
-        self.zh = {c["id"]: c["zh"] for c in ontology["classes"]}
-        self.cues = {c["id"]: c.get("cues", []) for c in ontology["classes"]}
-        self.all_ids = [c["id"] for c in ontology["classes"]
+def _span(a: float, b: float, axis: str) -> str:
+    """把一段区间说成人话。区间很窄时说成一个点, 不要写"从正中到正中"。"""
+    lead = "从左往右" if axis == "x" else "从上往下"
+    if b - a < 0.10:
+        return f"{lead}约{_frac((a + b) / 2)}"
+    return f"{lead}{_frac(a)}到{_frac(b)}之间"
+
+
+def position_text(bbox: list[float], W: int, H: int, granularity: str, rng: random.Random) -> str:
+    """把 bbox 转成自然语言方位。三档粒度, 由采样决定用哪档。**不输出坐标。**"""
+    x1, y1, x2, y2 = bbox
+    cx, cy = (x1 + x2) / 2 / W, (y1 + y2) / 2 / H
+    area = ((x2 - x1) * (y2 - y1)) / (W * H)
+    occupy = ("占画幅很小一块" if area < 0.03 else
+              "约占画幅的十分之一" if area < 0.12 else
+              "约占画幅的五分之一" if area < 0.25 else
+              "约占画幅的三分之一" if area < 0.42 else "占据画幅一半以上")
+
+    if granularity == "zone":
+        return f"在{_zone(cx, cy)}，{occupy}。"
+    if granularity == "ratio":
+        return (f"横向{_span(x1 / W, x2 / W, 'x')}，"
+                f"纵向{_span(y1 / H, y2 / H, 'y')}，{occupy}。")
+    # landmark: 只有确实靠边时才用边缘参照, 否则退回 zone+占比, 免得写出"距上边缘"这种残句
+    edges = sorted([("左边缘", x1 / W), ("右边缘", 1 - x2 / W),
+                    ("上边缘", y1 / H), ("下边缘", 1 - y2 / H)], key=lambda kv: kv[1])
+    near, d = edges[0]
+    if d >= 0.18:
+        return f"位于{_zone(cx, cy)}，四周均留有空白，{occupy}。"
+    far = edges[-1][0]
+    prox = "紧贴" if d < 0.05 else "靠近"
+    tail = rng.choice([f"，与画面{far}之间留有较大空白", "", f"，距画面{far}较远"])
+    return f"{prox}画面{near}，位于{_zone(cx, cy)}{tail}，{occupy}。"
+
+
+# ---------------------------------------------------------------- 生成器
+class RuleBuilder:
+    def __init__(self, onto: dict[str, Any], prompt_dir: str, seed: int = 0):
+        self.onto = onto
+        self.zh = {c["id"]: c["zh"] for c in onto["classes"]}
+        self.enabled = [c["id"] for c in onto["classes"]
                         if c["id"] != "normal" and c.get("enabled", True)]
+        _, self.asks = load_all(prompt_dir)
+        self.system = (Path(prompt_dir) / "system.txt").read_text(encoding="utf-8").strip()
         self.rng = random.Random(seed)
 
-    # -------------------------------------------------- 单题型
-    def q_judgement(self, s: Scene) -> list[dict]:
-        types = s.anomaly_types
-        if types:
-            names = "、".join(self.zh[t] for t in types if t in self.zh)
-            ev = s.events[0].evidence
-            detail = f"，共涉及约 {ev['count']} 个目标" if "count" in ev else ""
-            a = f"是。画面中存在异常：{names}{detail}。"
-        else:
-            a = "否。画面中未发现集结、烟火、越界等异常迹象，属于正常态势。"
-        return [self._mk(s, self.rng.choice(JUDGE_Q), a, "judgement")]
+    # -------------------------------------------------- 小工具
+    def _ask(self, task: str, **kw) -> str:
+        q = self.rng.choice(self.asks[task].lines)
+        for k, v in kw.items():
+            q = q.replace("{" + k + "}", str(v))
+        return q
 
-    def q_classify(self, s: Scene) -> list[dict]:
-        types = [t for t in s.anomaly_types if t in self.zh]
-        if not types:
-            return []
-        opts = list({*types, *self.rng.sample(self.all_ids, k=min(3, len(self.all_ids)))})
-        self.rng.shuffle(opts)
-        q = (self.rng.choice(CLASSIFY_Q) + "\n候选："
-             + "、".join(self.zh[o] for o in opts))
-        return [self._mk(s, q, "、".join(self.zh[t] for t in types) + "。", "classification")]
+    def _anomaly_zh(self, s: Scene) -> str:
+        return "、".join(self.zh[t] for t in s.anomaly_types if t in self.zh) or "异常"
 
-    def q_count(self, s: Scene) -> list[dict]:
-        by_cls: dict[str, int] = {}
-        for o in s.objects:
-            by_cls[o.cls] = by_cls.get(o.cls, 0) + 1
-        out = []
-        for cls, n in sorted(by_cls.items(), key=lambda kv: -kv[1])[:2]:
-            out.append(self._mk(s, f"画面中可见多少个 {cls}？", f"{n} 个。", "counting"))
-        return out
+    def _cluster(self, s: Scene):
+        return next((e for e in s.events if "cluster_bbox" in e.evidence), None)
 
-    def q_grounding(self, s: Scene) -> list[dict]:
-        cluster_ev = next((e for e in s.events if "cluster_bbox" in e.evidence), None)
-        out = []
-        if cluster_ev:
-            box = _norm_box(cluster_ev.evidence["cluster_bbox"], s.width, s.height)
-            out.append(self._mk(
-                s, f"请框出画面中的{self.zh[cluster_ev.type]}区域，给出坐标。",
-                box_json(box, self.zh[cluster_ev.type]), "grounding"))
-        if s.objects:
-            o = max(s.objects, key=lambda x: x.area)
-            out.append(self._mk(
-                s, f"请给出画面中最显著的 {o.cls} 的边界框坐标。",
-                box_json(_norm_box(o.bbox, s.width, s.height), o.cls), "grounding"))
-        return out
-
-    def q_attribute(self, s: Scene) -> list[dict]:
-        if not s.objects:
-            return []
-        o = self.rng.choice(s.objects)
-        moving = o.attrs.get("moving")
-        if moving is None:
-            return []
-        state = "处于移动状态" if moving else "处于静止状态"
-        return [self._mk(s, f"位于{_quadrant(o, s.width, s.height)}的 {o.cls} 是静止还是移动的？",
-                         f"该 {o.cls} {state}。", "attribute")]
-
-    def q_spatial(self, s: Scene) -> list[dict]:
-        out = []
+    def _region_box(self, s: Scene) -> tuple[list[float], str] | None:
+        """异常区域的像素 bbox 与标签。没有区域信息就返回 None。"""
+        ev = self._cluster(s)
+        if ev:
+            return ev.evidence["cluster_bbox"], f"{self.zh.get(ev.type, ev.type)}区域"
         for e in s.events:
-            if e.evidence.get("rule") == "boundary_cross":
-                d = DIRECTION_ZH.get(str(e.evidence.get("direction")), "跨越了边界")
-                out.append(self._mk(
-                    s, f"目标相对于「{e.evidence['region']}」的位置关系发生了什么变化？",
-                    f"该 {e.evidence.get('cls', '目标')} {d}，构成越界移动。", "spatial"))
-                break
-        if not out and s.objects:
-            o = self.rng.choice(s.objects)
-            out.append(self._mk(s, f"画面中的 {o.cls} 主要分布在什么位置？",
-                                f"主要位于{_quadrant(o, s.width, s.height)}。", "spatial"))
-        return out
+            if e.evidence.get("boxes"):
+                bs = e.evidence["boxes"]
+                xs = [b[0] for b in bs] + [b[2] for b in bs]
+                ys = [b[1] for b in bs] + [b[3] for b in bs]
+                return [min(xs), min(ys), max(xs), max(ys)], self.zh.get(e.type, e.type)
+        cands = [o for o in s.objects if o.cls in ("fire", "smoke")]
+        if cands:
+            o = max(cands, key=lambda x: x.area)
+            return o.bbox, CLS_ZH.get(o.cls, o.cls)
+        # 越界场景没有 cluster_bbox, 用越界目标的外接框
+        objs = self._crossed_objs(s)
+        if objs:
+            xs = [v for o in objs for v in (o.bbox[0], o.bbox[2])]
+            ys = [v for o in objs for v in (o.bbox[1], o.bbox[3])]
+            return [min(xs), min(ys), max(xs), max(ys)], "越界目标所在区域"
+        return None
 
-    def q_describe(self, s: Scene) -> list[dict]:
-        if s.caption:
-            a = s.caption
-        else:
-            by_cls: dict[str, int] = {}
-            for o in s.objects:
-                by_cls[o.cls] = by_cls.get(o.cls, 0) + 1
-            objs = "、".join(f"{n} 个 {c}" for c, n in sorted(by_cls.items(), key=lambda kv: -kv[1])[:3])
-            view = {"uav": "无人机航拍", "satellite": "卫星遥感", "cctv": "地面监控", "ground": "地面"}.get(s.view, "航拍")
-            if s.anomaly_types:
-                names = "、".join(self.zh[t] for t in s.anomaly_types if t in self.zh)
-                a = f"这是一张{view}画面，可见{objs or '若干目标'}。画面呈现{names}特征，建议持续观察并上报。"
-            else:
-                a = f"这是一张{view}画面，可见{objs or '少量常规目标'}，目标分布稀疏，未见异常活动迹象。"
-        return [self._mk(s, self.rng.choice(DESCRIBE_Q), a, "description")]
+    def _crossed_objs(self, s: Scene) -> list[Obj]:
+        tids = {str(e.evidence.get("track_id")) for e in s.events
+                if e.evidence.get("rule") == "boundary_cross"}
+        return [o for o in s.objects if o.track_id is not None and str(o.track_id) in tids]
 
-    def q_reason(self, s: Scene) -> list[dict]:
-        t = s.anomaly_types[0] if s.anomaly_types else "normal"
-        q = REASON_Q.get(t)
-        if not q:
-            return []
-        cues = "；".join(self.cues.get(t, [])) or "无明显异常线索"
-        if t == "normal":
-            a = f"依据：{cues}。目标数量与分布均处于常态范围，因此判定为无异常。"
-        else:
-            ev = s.events[0].evidence
-            quant = f"规则量化结果为 {ev.get('count', ev.get('r2', 'N/A'))}。" if ev else ""
-            a = f"判定依据：{cues}。{quant}综合以上特征，判定为{self.zh.get(t, t)}。"
-        return [self._mk(s, q, a, "reasoning")]
-
-    def q_negative(self, s: Scene) -> list[dict]:
-        """问画面里没有的异常, 逼模型学会说'没有' —— 抗幻觉的关键题型。"""
-        present = set(s.anomaly_types)
-        absent = [c for c in self.all_ids if c not in present]
-        if not absent:
-            return []
-        t = self.rng.choice(absent)
-        return [self._mk(s, f"画面中是否出现了{self.zh[t]}？",
-                         f"否。画面中未观察到{self.zh[t]}的迹象。", "negation")]
-
-    # -------------------------------------------------- 组装
-    def _mk(self, s: Scene, q: str, a: str, qa_type: str) -> dict:
+    def _mk(self, s: Scene, turns: list[tuple[str, str]], task: str, **extra) -> dict:
+        msgs: list[dict] = [{"role": "system", "content": self.system}]
+        n_img = len(s.meta.get("frames", [])) or 1
+        for i, (q, a) in enumerate(turns):
+            msgs.append({"role": "user",
+                         "content": ("<image>" * n_img + q) if i == 0 else q})
+            msgs.append({"role": "assistant", "content": a})
         return {
-            "messages": [
-                {"role": "user", "content": "<image>" + q},
-                {"role": "assistant", "content": a},
-            ],
-            "images": [s.image_path],
-            "extra": {
-                "image_id": s.image_id,
-                "qa_type": qa_type,
-                "anomaly": s.anomaly_types or ["normal"],
-                "source_dataset": s.source_dataset,
-                "license": s.license,
-                "view": s.view,
-                "image_width": s.width,
-                "image_height": s.height,
-                "coordinate_mode": COORD_MODE,
-                "bbox_scale": BOX_SCALE,
-            },
+            "messages": msgs,
+            "images": s.meta.get("frames") or [s.image_path],
+            "extra": {"image_id": s.image_id, "task": task, "gen": "rule",
+                      "n_turns": len(turns), "n_images": n_img,
+                      "anomaly": s.anomaly_types or ["normal"],
+                      "hard_negative": bool(s.meta.get("hard_negative")),
+                      "source_dataset": s.source_dataset, "license": s.license,
+                      "view": s.view, "image_width": s.width, "image_height": s.height,
+                      "coordinate_mode": COORD_MODE, "bbox_scale": BBOX_SCALE, **extra},
         }
 
+    # -------------------------------------------------- 四类任务
+    def judge(self, s: Scene) -> tuple[str, str]:
+        q = self._ask("judge")
+        if s.anomaly_types:
+            ev = s.events[0].evidence
+            n = ev.get("count")
+            cls_hint = ""
+            if n:
+                main = max(((o.cls, sum(1 for x in s.objects if x.cls == o.cls))
+                            for o in s.objects), key=lambda kv: kv[1], default=None)
+                if main:
+                    cls_hint = f"{n}{MEASURE.get(main[0], '个')}{CLS_ZH.get(main[0], main[0])}"
+            lead = self.rng.choice(["存在异常，为", "画面中出现异常：", "判定为",
+                                    "有异常。类型为"])
+            tail = ""
+            if cls_hint:
+                tail = self.rng.choice([
+                    f"画面中可见 {cls_hint} 密集分布。",
+                    f"共观察到 {cls_hint}，成簇分布。",
+                    f"涉及 {cls_hint}。",
+                ])
+            need = self.rng.choice(["", "建议上报并持续观察。", "建议持续观察。", ""])
+            a = f"{lead}{self._anomaly_zh(s)}。{tail}{need}"
+        elif s.meta.get("hard_negative"):
+            by: dict[str, int] = {}
+            for o in s.objects:
+                by[o.cls] = by.get(o.cls, 0) + 1
+            cls, n = max(by.items(), key=lambda kv: kv[1]) if by else ("目标", 0)
+            what = f"{n}{MEASURE.get(cls, '个')}{CLS_ZH.get(cls, cls)}" if n else "若干目标"
+            a = (f"未见异常。画面中虽有 {what} 密集成簇、达到了集结的规模条件，"
+                 f"但均为民用目标，未见坦克、装甲车或军机等军事装备，属于正常场景。")
+        else:
+            a = self.rng.choice([
+                "未见异常。目标分布稀疏，无烟火迹象，也没有跨越边界的移动目标。",
+                "未见异常，态势正常，不需要上报。画面中没有成规模的目标聚集，"
+                "也没有烟雾或火光。",
+                "属于正常态势。逐项核查：无军事装备集结、无人员异常聚集、"
+                "无烟火、无越界移动。",
+                "没有发现需要关注的情况。画面中的目标数量与分布都在常态范围内。",
+                "未见异常。该画面属于常规场景，无需进一步处置。",
+            ])
+        return q, a
+
+    def locate_verbal(self, s: Scene) -> tuple[str, str] | None:
+        rb = self._region_box(s)
+        if rb is None:
+            return None
+        box, label = rb
+        gran = self.rng.choices(["zone", "ratio", "landmark"], weights=[40, 35, 25])[0]
+        q = self._ask("locate_verbal", zh=self._anomaly_zh(s))
+        return q, position_text(box, s.width, s.height, gran, self.rng)
+
+    def locate_box(self, s: Scene) -> tuple[str, str] | None:
+        rb = self._region_box(s)
+        if rb is None:
+            return None
+        box, label = rb
+        q = self._ask("locate_box", zh=self._anomaly_zh(s))
+        return q, box_json(to_bbox2d(box, s.width, s.height), label)
+
+    def locate_box_multi(self, s: Scene) -> tuple[str, str] | None:
+        """越界类: 多个目标一起框出。"""
+        objs = self._crossed_objs(s)
+        if not objs:
+            return None
+        q = self._ask("locate_box", zh="越界目标")
+        return q, boxes_json([(to_bbox2d(o.bbox, s.width, s.height), "越界目标") for o in objs])
+
+    def count(self, s: Scene) -> tuple[str, str] | None:
+        by: dict[str, int] = {}
+        for o in s.objects:
+            by[o.cls] = by.get(o.cls, 0) + 1
+        if not by:
+            return None
+        cls, n = max(by.items(), key=lambda kv: kv[1])
+        mw = MEASURE.get(cls, "个")
+        q = self._ask("count", mw=mw, label=CLS_ZH.get(cls, cls))
+        return q, f"{n}{mw}。"
+
+    def negation(self, s: Scene) -> tuple[str, str] | None:
+        """否定变体。**只问本数据集里真实存在、这张图上恰好没有的异常类型** ——
+        问航拍图有没有潜艇，不看图也知道没有，那种题 needs_image 维会被判低分。"""
+        absent = [c for c in self.enabled if c not in s.anomaly_types]
+        if not absent:
+            return None
+        t = self.rng.choice(absent)
+        style = self.rng.random()
+        if style < 0.45:
+            return self._ask("negation", zh=self.zh[t]), f"否，未观察到{self.zh[t]}的迹象。"
+        if style < 0.75:
+            return (self._ask("locate_verbal", zh=self.zh[t]),
+                    f"画面中未发现{self.zh[t]}，无从指出其方位。")
+        cls = self.rng.choice(["tank", "warship", "military-plane"])
+        if any(o.cls == cls for o in s.objects):
+            return self._ask("negation", zh=self.zh[t]), f"否，未观察到{self.zh[t]}的迹象。"
+        return (self._ask("count", mw=MEASURE.get(cls, "个"), label=CLS_ZH[cls]),
+                f"0{MEASURE.get(cls, '个')}。")
+
+    # -------------------------------------------------- 组装
     def build(self, s: Scene) -> list[dict]:
         out: list[dict] = []
-        for fn in (self.q_judgement, self.q_classify, self.q_count, self.q_grounding,
-                   self.q_attribute, self.q_spatial, self.q_describe, self.q_reason,
-                   self.q_negative):
-            out.extend(fn(s))
+        r = self.rng
+
+        # 判定 —— 每张图必出
+        jq, ja = self.judge(s)
+        if r.random() < TWO_TURN_RATIO:
+            second = self.locate_verbal(s) if r.random() < LOCATE_VERBAL_RATIO else self.locate_box(s)
+            if second:
+                out.append(self._mk(s, [(jq, ja), second], "judge+locate",
+                                    form="multi_turn"))
+            else:
+                out.append(self._mk(s, [(jq, ja)], "judge"))
+        else:
+            out.append(self._mk(s, [(jq, ja)], "judge"))
+
+        # 定位 —— 方位七成 / 坐标三成。取不到区域框的图(如无事件的正常图)自然跳过
+        if r.random() < LOCATE_VERBAL_RATIO:
+            if (t := self.locate_verbal(s)):
+                out.append(self._mk(s, [t], "locate_verbal"))
+        elif (t := self.locate_box_multi(s) or self.locate_box(s)):
+            out.append(self._mk(s, [t], "locate_box"))
+
+        # 计数
+        if (t := self.count(s)):
+            out.append(self._mk(s, [t], "count"))
+
+        # 否定变体
+        if r.random() < NEGATION_RATIO and (t := self.negation(s)):
+            out.append(self._mk(s, [t], "negation"))
         return out
 
 
@@ -240,35 +329,33 @@ def split_by_group(samples: list[dict], ratios=(0.8, 0.1, 0.1), seed: int = 0):
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Scene -> VQA(ShareGPT) 数据生成")
+    ap = argparse.ArgumentParser(description="规则生成: 判定/方位/坐标/计数")
     ap.add_argument("--scenes", required=True)
-    ap.add_argument("--out-dir", default="data/vqa")
+    ap.add_argument("--out-dir", default="data/vqa_rule")
     ap.add_argument("--ontology", default="configs/ontology.yaml")
+    ap.add_argument("--prompt-dir", default="configs/prompts")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--no-split", action="store_true", help="不切分, 只输出单个 all.json")
+    ap.add_argument("--no-split", action="store_true")
     ap.add_argument("--exclude-ids", default=None,
-                    help="golden set 的 image_id 清单, 必须排除否则泄漏(make_golden.py 产出)")
+                    help="golden set 的 image_id 清单, 必须排除否则泄漏")
     args = ap.parse_args()
 
     onto = yaml.safe_load(Path(args.ontology).read_text(encoding="utf-8"))
-    global BOX_SCALE
-    BOX_SCALE = int(onto.get("box_scale", BOX_SCALE))
-
-    builder = QABuilder(onto, seed=args.seed)
+    builder = RuleBuilder(onto, args.prompt_dir, seed=args.seed)
     scenes = load_scenes(args.scenes)
     if args.exclude_ids:
         excl = {ln.strip() for ln in Path(args.exclude_ids).read_text(encoding="utf-8").splitlines() if ln.strip()}
         before = len(scenes)
         scenes = [s for s in scenes if s.image_id not in excl]
         print(f"排除 golden set: {before} -> {len(scenes)} 个 scene")
-    samples = [qa for s in scenes for qa in builder.build(s)]
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    samples = [qa for s in scenes for qa in builder.build(s)]
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
 
     def _write(name: str, data: list[dict]) -> None:
-        (out_dir / f"{name}.json").write_text(
-            json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        (out / f"{name}.json").write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                                          encoding="utf-8")
         print(f"  {name}.json  {len(data)} 条")
 
     if args.no_split:
@@ -277,15 +364,15 @@ def main() -> None:
         for name, part in split_by_group(samples, seed=args.seed).items():
             _write(name, part)
 
-    hist: dict[str, int] = {}
-    for s in samples:
-        hist[s["extra"]["qa_type"]] = hist.get(s["extra"]["qa_type"], 0) + 1
+    from collections import Counter
+    tasks = Counter(s["extra"]["task"] for s in samples)
+    turns = Counter(s["extra"]["n_turns"] for s in samples)
     n_norm = sum(1 for s in samples if s["extra"]["anomaly"] == ["normal"])
-    print(f"\n共 {len(samples)} 条 QA / {len(scenes)} 个 scene")
+    print(f"\n共 {len(samples)} 条 / {len(scenes)} 个 scene")
     print(f"正常样本占比 {n_norm / max(1, len(samples)):.1%}"
           f"（目标 ≥{onto.get('negative_ratio_target', 0.3):.0%}）")
-    for k, v in sorted(hist.items(), key=lambda kv: -kv[1]):
-        print(f"  {k:14s} {v:6d}  {v / len(samples):.1%}")
+    print("  任务:", dict(tasks.most_common()))
+    print("  轮数:", {f"{k}轮": v for k, v in sorted(turns.items())})
 
 
 if __name__ == "__main__":

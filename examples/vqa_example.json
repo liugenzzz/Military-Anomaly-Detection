@@ -2,212 +2,395 @@
  {
   "messages": [
    {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
     "role": "user",
-    "content": "<image>请判断当前监控画面是否出现异常，并说明依据。"
+    "content": "<image>画面中有无异常？属于哪一类？"
    },
    {
     "role": "assistant",
-    "content": "是。画面中存在异常：越界移动。"
+    "content": "存在异常，为越界移动。"
    }
   ],
   "images": [
-   "data/raw/demo/crossing_002.jpg"
+   "data/raw/demo/crossing_034.jpg"
   ],
   "extra": {
-   "image_id": "demo_crossing_002",
-   "qa_type": "judgement",
+   "image_id": "demo_crossing_034",
+   "task": "judge",
+   "gen": "rule",
+   "n_turns": 1,
+   "n_images": 1,
    "anomaly": [
     "border_crossing"
    ],
+   "hard_negative": false,
    "source_dataset": "DEMO-synthetic",
    "license": "cc0",
-   "view": "uav"
+   "view": "uav",
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000
   }
  },
  {
   "messages": [
    {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
     "role": "user",
-    "content": "<image>这属于什么性质的异常事件？\n候选：异常聚集、越界移动、爆炸/火光"
+    "content": "<image>越界移动靠近画面的哪条边？"
    },
    {
     "role": "assistant",
-    "content": "越界移动。"
+    "content": "横向从左往右三分之一处到三分之二处之间，纵向从上往下约四成，占画幅很小一块。"
    }
   ],
   "images": [
-   "data/raw/demo/crossing_002.jpg"
+   "data/raw/demo/crossing_034.jpg"
   ],
   "extra": {
-   "image_id": "demo_crossing_002",
-   "qa_type": "classification",
+   "image_id": "demo_crossing_034",
+   "task": "locate_verbal",
+   "gen": "rule",
+   "n_turns": 1,
+   "n_images": 1,
    "anomaly": [
     "border_crossing"
    ],
+   "hard_negative": false,
    "source_dataset": "DEMO-synthetic",
    "license": "cc0",
-   "view": "uav"
+   "view": "uav",
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000
   }
  },
  {
   "messages": [
    {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
     "role": "user",
-    "content": "<image>画面中可见多少个 vehicle？"
+    "content": "<image>图中一共有几辆车辆？"
    },
    {
     "role": "assistant",
-    "content": "3 个。"
+    "content": "2辆。"
    }
   ],
   "images": [
-   "data/raw/demo/crossing_002.jpg"
+   "data/raw/demo/crossing_034.jpg"
   ],
   "extra": {
-   "image_id": "demo_crossing_002",
-   "qa_type": "counting",
+   "image_id": "demo_crossing_034",
+   "task": "count",
+   "gen": "rule",
+   "n_turns": 1,
+   "n_images": 1,
    "anomaly": [
     "border_crossing"
    ],
+   "hard_negative": false,
    "source_dataset": "DEMO-synthetic",
    "license": "cc0",
-   "view": "uav"
+   "view": "uav",
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000
   }
  },
  {
   "messages": [
    {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
     "role": "user",
-    "content": "<image>请给出画面中最显著的 vehicle 的边界框坐标。"
+    "content": "<image>越界移动出现在画面的什么位置？"
    },
    {
     "role": "assistant",
-    "content": "[vehicle] [394, 406, 416, 438]"
+    "content": "画面中未发现越界移动，无从指出其方位。"
    }
   ],
   "images": [
-   "data/raw/demo/crossing_002.jpg"
+   "data/raw/demo/massing_024.jpg"
   ],
   "extra": {
-   "image_id": "demo_crossing_002",
-   "qa_type": "grounding",
+   "image_id": "demo_massing_024",
+   "task": "negation",
+   "gen": "rule",
+   "n_turns": 1,
+   "n_images": 1,
    "anomaly": [
-    "border_crossing"
+    "normal"
    ],
+   "hard_negative": true,
    "source_dataset": "DEMO-synthetic",
    "license": "cc0",
-   "view": "uav"
+   "view": "uav",
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000
   }
  },
  {
   "messages": [
    {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
     "role": "user",
-    "content": "<image>位于画面中央的 vehicle 是静止还是移动的？"
+    "content": "<image>请给出越界目标的边界框坐标。"
    },
    {
     "role": "assistant",
-    "content": "该 vehicle 处于移动状态。"
+    "content": "[{\"bbox_2d\":[456,406,478,438],\"label\":\"越界目标\"},{\"bbox_2d\":[564,406,586,438],\"label\":\"越界目标\"}]"
    }
   ],
   "images": [
-   "data/raw/demo/crossing_002.jpg"
+   "data/raw/demo/crossing_006.jpg"
   ],
   "extra": {
-   "image_id": "demo_crossing_002",
-   "qa_type": "attribute",
+   "image_id": "demo_crossing_006",
+   "task": "locate_box",
+   "gen": "rule",
+   "n_turns": 1,
+   "n_images": 1,
    "anomaly": [
     "border_crossing"
    ],
+   "hard_negative": false,
    "source_dataset": "DEMO-synthetic",
    "license": "cc0",
-   "view": "uav"
+   "view": "uav",
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000
   }
  },
  {
   "messages": [
    {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
     "role": "user",
-    "content": "<image>目标相对于「restricted_zone_A」的位置关系发生了什么变化？"
+    "content": "<image>画面中是否存在异常军事活动？"
    },
    {
     "role": "assistant",
-    "content": "该 vehicle 自边界线一侧越至另一侧，构成越界移动。"
+    "content": "有异常。类型为越界移动。"
+   },
+   {
+    "role": "user",
+    "content": "说明异常所处的大致方位。"
+   },
+   {
+    "role": "assistant",
+    "content": "在画面中央，占画幅很小一块。"
    }
   ],
   "images": [
-   "data/raw/demo/crossing_002.jpg"
+   "data/raw/demo/crossing_046.jpg"
   ],
   "extra": {
-   "image_id": "demo_crossing_002",
-   "qa_type": "spatial",
+   "image_id": "demo_crossing_046",
+   "task": "judge+locate",
+   "gen": "rule",
+   "n_turns": 2,
+   "n_images": 1,
    "anomaly": [
     "border_crossing"
    ],
+   "hard_negative": false,
    "source_dataset": "DEMO-synthetic",
    "license": "cc0",
-   "view": "uav"
+   "view": "uav",
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000,
+   "form": "multi_turn"
   }
  },
  {
   "messages": [
    {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
     "role": "user",
-    "content": "<image>用一段话概括画面的态势要点。"
+    "content": "<image>有没有异常？把画面情况说一下。"
    },
    {
     "role": "assistant",
-    "content": "这是一张无人机航拍画面，可见3 个 vehicle。画面呈现越界移动特征，建议持续观察并上报。"
+    "content": "画面为常规场景，目标分布稀疏，未见成规模聚集，也无烟火或跨界移动，态势正常。"
    }
   ],
   "images": [
-   "data/raw/demo/crossing_002.jpg"
+   "data/raw/demo/massing_000.jpg"
   ],
   "extra": {
-   "image_id": "demo_crossing_002",
-   "qa_type": "description",
+   "image_id": "demo_massing_000",
+   "task": "describe",
+   "facet": "scan",
+   "gen": "llm",
+   "n_turns": 1,
+   "n_images": 1,
    "anomaly": [
-    "border_crossing"
+    "normal"
    ],
    "source_dataset": "DEMO-synthetic",
    "license": "cc0",
-   "view": "uav"
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000,
+   "review": "skipped"
   }
  },
  {
   "messages": [
    {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
     "role": "user",
-    "content": "<image>请说明越界行为的发生方向与判定依据。"
+    "content": "<image>画面中这些密集停放的车辆是否构成装备集结？"
    },
    {
     "role": "assistant",
-    "content": "判定依据：目标轨迹跨越边界线；进入禁入区域；由界外向界内移动。规则量化结果为 N/A。综合以上特征，判定为越界移动。"
+    "content": "不构成集结。虽然目标确实密集成簇、达到规模条件，但均为民用车辆，未见军事装备。"
    }
   ],
   "images": [
-   "data/raw/demo/crossing_002.jpg"
+   "data/raw/demo/massing_000.jpg"
   ],
   "extra": {
-   "image_id": "demo_crossing_002",
-   "qa_type": "reasoning",
+   "image_id": "demo_massing_000",
+   "task": "describe",
+   "facet": "hard_neg",
+   "gen": "llm",
+   "n_turns": 1,
+   "n_images": 1,
    "anomaly": [
-    "border_crossing"
+    "normal"
    ],
    "source_dataset": "DEMO-synthetic",
    "license": "cc0",
-   "view": "uav"
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000,
+   "review": "skipped"
   }
  },
  {
   "messages": [
    {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
     "role": "user",
-    "content": "<image>画面中是否出现了烟雾？"
+    "content": "<image>从这些迹象能推断出什么？"
    },
    {
     "role": "assistant",
-    "content": "否。画面中未观察到烟雾的迹象。"
+    "content": "位于画面左上角的一片区域，颜色偏暗，可见烟雾升起。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/massing_000.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_massing_000",
+   "task": "reason",
+   "facet": "reason",
+   "gen": "llm",
+   "n_turns": 1,
+   "n_images": 1,
+   "anomaly": [
+    "normal"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000,
+   "review": "skipped"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
+    "role": "user",
+    "content": "<image>说明这批目标的类型构成。"
+   },
+   {
+    "role": "assistant",
+    "content": "全部为同一类目标，未见其他类型的伴随目标，构成单一。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crowd_001.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crowd_001",
+   "task": "describe",
+   "facet": "composition",
+   "gen": "llm",
+   "n_turns": 1,
+   "n_images": 1,
+   "anomaly": [
+    "massing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000,
+   "review": "skipped"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
+    "role": "user",
+    "content": "<image>它们之间有配合吗？"
+   },
+   {
+    "role": "assistant",
+    "content": "三个目标同步移动、速度接近、间距保持稳定，表现为一次成组行动。"
    }
   ],
   "images": [
@@ -215,13 +398,243 @@
   ],
   "extra": {
    "image_id": "demo_crossing_002",
-   "qa_type": "negation",
+   "task": "describe",
+   "facet": "group",
+   "gen": "llm",
+   "n_turns": 1,
+   "n_images": 1,
    "anomaly": [
     "border_crossing"
    ],
    "source_dataset": "DEMO-synthetic",
    "license": "cc0",
-   "view": "uav"
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000,
+   "review": "skipped"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
+    "role": "user",
+    "content": "<image>从画面上看，有哪些线索支持越界移动这一判断？"
+   },
+   {
+    "role": "assistant",
+    "content": "依据有三：目标数量达三十个，超出常态；分布密集成簇；成规模集中于同一区域。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crossing_002.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crossing_002",
+   "task": "describe",
+   "facet": "evidence",
+   "gen": "llm",
+   "n_turns": 1,
+   "n_images": 1,
+   "anomaly": [
+    "border_crossing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000,
+   "review": "skipped"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
+    "role": "user",
+    "content": "<image>目标停放的场地有什么特点？"
+   },
+   {
+    "role": "assistant",
+    "content": "处于开阔的平整地面，未见建筑或掩体，地表色调均一。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crowd_005.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crowd_005",
+   "task": "describe",
+   "facet": "site",
+   "gen": "llm",
+   "n_turns": 1,
+   "n_images": 1,
+   "anomaly": [
+    "massing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000,
+   "review": "skipped"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
+    "role": "user",
+    "content": "<image>它们的排列方式说明了什么？"
+   },
+   {
+    "role": "assistant",
+    "content": "排成两列，前列较多、后列略少，间距基本一致，朝向统一，整体排布规整。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crowd_005.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crowd_005",
+   "task": "describe",
+   "facet": "formation",
+   "gen": "llm",
+   "n_turns": 1,
+   "n_images": 1,
+   "anomaly": [
+    "massing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000,
+   "review": "skipped"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
+    "role": "user",
+    "content": "<image>描述目标与边界线的相对位置。"
+   },
+   {
+    "role": "assistant",
+    "content": "三个目标当前位于界内一侧，距边界约为自身长度的两到三倍，方向为由外进内。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crossing_006.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crossing_006",
+   "task": "describe",
+   "facet": "boundary_relation",
+   "gen": "llm",
+   "n_turns": 1,
+   "n_images": 1,
+   "anomaly": [
+    "border_crossing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000,
+   "review": "skipped"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
+    "role": "user",
+    "content": "<image>量化描述一下这次聚集。"
+   },
+   {
+    "role": "assistant",
+    "content": "共三十个目标，聚集区域约占画幅的十分之一，间距小于目标自身尺寸。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crowd_009.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crowd_009",
+   "task": "describe",
+   "facet": "scale",
+   "gen": "llm",
+   "n_turns": 1,
+   "n_images": 1,
+   "anomaly": [
+    "massing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000,
+   "review": "skipped"
+  }
+ },
+ {
+  "messages": [
+   {
+    "role": "system",
+    "content": "你是一名航拍与监控画面的异常态势分析助手，负责识别画面中的异常活动、指出异常所在区域，\n并给出可核查的判定依据。\n\n工作准则：\n1. 只描述画面中实际可见的内容。看不清或不确定的，明确说明\"无法确认\"，不要猜测。\n2. 问「在什么位置/什么方位」时，用自然语言描述方位；问「框出/给出坐标」时，\n   才输出 {\"bbox_2d\":[x1,y1,x2,y2],\"label\":\"...\"}，坐标归一化到 0~1000。\n3. 判定异常必须给出视觉依据：目标类型、数量、分布形态、烟火特征、与边界的位置关系。\n4. 不推测画面之外的信息：国别、部队番号、装备具体型号、人员身份、事件起因。\n5. 目标密集聚集不等于军事异常。民用车辆、民航客机、民用船舶的密集停放属于正常场景，\n   只有出现军事目标时才判定为装备集结。\n6. 未见异常时直接回答未见异常，不要为了迎合提问而编造。"
+   },
+   {
+    "role": "user",
+    "content": "<image>综合描述这张画面。"
+   },
+   {
+    "role": "assistant",
+    "content": "无人机航拍画面，画面上部聚集三十名人员，分布密集成簇，符合人员异常聚集特征。"
+   }
+  ],
+  "images": [
+   "data/raw/demo/crossing_014.jpg"
+  ],
+  "extra": {
+   "image_id": "demo_crossing_014",
+   "task": "describe",
+   "facet": "full",
+   "gen": "llm",
+   "n_turns": 1,
+   "n_images": 1,
+   "anomaly": [
+    "border_crossing"
+   ],
+   "source_dataset": "DEMO-synthetic",
+   "license": "cc0",
+   "image_width": 1280,
+   "image_height": 1280,
+   "coordinate_mode": "qwen_relative_1000",
+   "bbox_scale": 1000,
+   "review": "skipped"
   }
  }
 ]

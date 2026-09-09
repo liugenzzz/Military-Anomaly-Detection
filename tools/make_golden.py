@@ -21,7 +21,7 @@ from pathlib import Path
 
 import yaml
 
-from build_vqa import QABuilder
+from build_vqa import RuleBuilder
 from scene import Scene, dump_scenes, load_scenes
 
 # 这些数据集自带人工精标, L2 直接从中借用, 无需自己标注
@@ -50,6 +50,7 @@ def main() -> None:
     ap.add_argument("--scenes", required=True, help="筛选后的 scene jsonl")
     ap.add_argument("--out-dir", default="data/golden")
     ap.add_argument("--ontology", default="configs/ontology.yaml")
+    ap.add_argument("--prompt-dir", default="configs/prompts")
     ap.add_argument("--per-cell", type=int, default=12,
                     help="每个 (数据源 x 异常类) 单元取多少张图")
     ap.add_argument("--l2-sources", nargs="*", default=sorted(HUMAN_ANNOTATED),
@@ -58,7 +59,7 @@ def main() -> None:
     args = ap.parse_args()
 
     onto = yaml.safe_load(Path(args.ontology).read_text(encoding="utf-8"))
-    builder = QABuilder(onto, seed=args.seed)
+    builder = RuleBuilder(onto, args.prompt_dir, seed=args.seed)
     scenes = load_scenes(args.scenes)
 
     l2_names = set(args.l2_sources)
@@ -74,13 +75,18 @@ def main() -> None:
     samples: list[dict] = []
     for level, group in (("L1", l1), ("L2", l2)):
         for s in group:
+            # L1 只取答案由标注唯一决定的题; L2 用人工精标源的判定与方位题
             if level == "L1":
-                qas = builder.q_count(s) + builder.q_grounding(s)    # 只取真值题
+                pairs = [(builder.count(s), "count"),
+                         (builder.locate_box(s), "locate_box")]
             else:
-                qas = builder.q_judgement(s) + builder.q_describe(s) + builder.q_classify(s)
-            for qa in qas:
-                qa["extra"]["golden_level"] = level
-                qa["extra"]["human_verified"] = (level == "L2")
+                pairs = [(builder.judge(s), "judge"),
+                         (builder.locate_verbal(s), "locate_verbal")]
+            for turn, task in pairs:
+                if not turn:
+                    continue
+                qa = builder._mk(s, [turn], task, golden_level=level,
+                                 human_verified=(level == "L2"))
                 samples.append(qa)
 
     out = Path(args.out_dir)
@@ -92,7 +98,7 @@ def main() -> None:
     (out / "exclude_ids.txt").write_text("\n".join(exclude) + "\n", encoding="utf-8")
     dump_scenes(l1 + l2, out / "golden_scenes.jsonl")
 
-    hist = Counter(s["extra"]["qa_type"] for s in samples)
+    hist = Counter(s["extra"]["task"] for s in samples)
     by_src = Counter(s["extra"]["source_dataset"] for s in samples)
     print(f"golden set: {len(samples)} 条 QA / {len(exclude)} 张图")
     print(f"  L1 自动可验证(计数+grounding, 零人工): {sum(1 for s in samples if s['extra']['golden_level'] == 'L1')}")
