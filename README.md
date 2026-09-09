@@ -37,7 +37,8 @@
 **9 个数据集各自的处理方式、命令与坑见 [docs/09_dataset_processing.md](docs/09_dataset_processing.md)**；
 **任务类型定稿（5 类）、数量分配与数据可行性核对见 [docs/10_task_definition.md](docs/10_task_definition.md)**；
 **20 个生成任务的逐条规格（问什么、答什么、谁生成）见 [docs/11_generation_tasks.md](docs/11_generation_tasks.md)**；
-**描述任务的分侧面设计（四类异常各用各的骨架、must-not 防模板化）见 [docs/12_description_design.md](docs/12_description_design.md)**。
+**描述任务的分侧面设计（四类异常各用各的骨架、must-not 防模板化）见 [docs/12_description_design.md](docs/12_description_design.md)**；
+**每个侧面的实际 Q/A 样例（供审阅修改）见 [docs/13_sample_qa.md](docs/13_sample_qa.md)**。
 
 ## 快速开始
 
