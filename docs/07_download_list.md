@@ -1,105 +1,132 @@
-# 下载清单：8 个源数据集 + 3 个工具性数据集
+# 下载清单：9 个源数据集 + 2 个混入数据集
 
-链接均已核实。标注「⚠️」的是需要注意的坑。
+> 与 [08 号文档](08_task_types.md) 的 4 类定稿一致。类别合并后 **DroneCrowd 从选配升为必需**
+> （人员聚集主力），所以是 9 个而非 8 个。各自的处理命令见 [09 号文档](09_dataset_processing.md)。
 
----
+链接均已核实。「⚠️」是需要注意的坑，「体积」为估算值，实际以下载页为准。
 
-## A 组 · 骨架
-
-### 1. ERA（航拍事件视频）
-- **主页**：<https://lcmou.github.io/ERA_Dataset/>
-- **备用**：<https://ieee-dataport.org/open-access/era-dataset>
-- **内容**：2,864 段视频，每段 5 秒 / 30fps / 640×640，25 类事件
-- **要什么**：全部下载。`fire` `conflict` `parade` `constructing` 是异常类，`non-event` 是负样本
-- **处理**：每段抽 3 帧（首/中/尾）→ 约 8.5k 图
-- ⚠️ 视频源自 YouTube，仅可按原协议用于研究
-
-### 2. CapERA（ERA 的人工 caption）
-- **仓库**：<https://github.com/yakoubbazi/CapEra>
-- **内容**：给 ERA 全部 2,864 段视频每段 5 条人工 caption
-- ⚠️ **只有标注文件，视频要用 ERA 的**。所以 ERA 必须先下
-- **价值**：零成本拿到人工描述标注，也是 golden set 的 L2 层主力来源
-
-### 3. HIVAU-70k（层级化异常理解指令）
-- **官方仓库**：<https://github.com/pipixin321/HolmesVAU>（CVPR 2025 Highlight）
-- **HuggingFace 预处理版**：`backseollgi/HIVAU-70k_UCF-Crime`、`backseollgi/HIVAU-70k_XD-Violence`
-- **内容**：7 万+ 条指令标注，clip / event / video 三粒度，含判断、描述、因果分析
-- ⚠️ **仓库里是标注 JSON，视频本体要另外下**：
-  - UCF-Crime：<https://www.crcv.ucf.edu/projects/real-world/>（1,900 段 / 128 小时）
-  - XD-Violence：<https://roc-ng.github.io/XD-Violence/>（4,754 段 / 217 小时）
-- 💡 **先试 HuggingFace 的预处理版**，它已经切好片段。够用就不必下 345 小时的原始视频，能省几百 GB 磁盘和大量下载时间
-
-### 4. VisDrone（航拍底座 + 轨迹）
-- **仓库**：<https://github.com/VisDrone/VisDrone-Dataset>
-- **要两个子集**：
-  - `VisDrone2019-DET`（检测，train/val/test-dev）—— 提供航拍 bbox 底座与负样本
-  - `VisDrone2019-MOT`（多目标跟踪）—— **提供 track_id，越界移动只能从这里派生**
-- **处理**：MOT 按 `--stride 30` 抽关键帧，配合人工画的虚拟边界线
+| # | 数据集 | 供哪个类 | 体积估算 | 获取方式 |
+|---|---|---|---|---|
+| 1 | Mendeley UAV 军事目标 | `massing/equipment` | ~1–3 GB | 网页直接下载，无需注册 ⭐ 先下这个 |
+| 2 | MAR20 | `massing/equipment` | ~2–4 GB | 官方主页（可能走网盘）或 Roboflow 镜像 |
+| 3 | FASDD_UAV | `smoke` + `explosion` | ~5–10 GB | Science Data Bank，只下 `FASDD_UAV.zip` |
+| 4 | ERA + CapERA | `personnel`/`explosion`/正常 | ~10–20 GB | 主页下载；CapERA 只是标注文件 |
+| 5 | DroneCrowd | `massing/personnel` | ~15–25 GB | GitHub 页给出网盘链接 |
+| 6 | VisDrone DET + MOT | `border_crossing` + 正常 | ~20–30 GB | GitHub 页给出各子集链接 |
+| 7 | DOTA v2.0 | 困难负样本主力 | ~30–50 GB（切片后更大） | 官网需注册 |
+| 8 | Drone-Anomaly | 正常帧 | ~10–15 GB | GitHub 页给出网盘链接 |
+| 9 | UCF-Crime / XD-Violence + HIVAU-70k | `explosion` + 同场景负样本 | 视是否下原始视频，见下 | 建议先只下 HIVAU 的 HF 预处理版 |
 
 ---
 
-## B 组 · 军事属性
+## 1. Mendeley UAV 多类军事目标 ⭐ 建议第一个下
 
-### 5. Mendeley UAV 多类军事目标
-- **地址**：<https://data.mendeley.com/datasets/9z7yrcrpjk/1>
-- **内容**：7,985 张标注图 / 14,018 实例，4 类：tank、drone、people、soldier，航拍视角
-- **价值**：**唯一「军事目标 + 航拍视角 + bbox」三者齐全**的公开集
-- ⚠️ 含合成增强数据，筛选时留意是否需要区分对待
+<https://data.mendeley.com/datasets/9z7yrcrpjk/1>
 
-### 6. MAR20（军机遥感识别）
-- **官方**：<https://gcheng-nwpu.github.io/>（西北工业大学）
-- **YOLO 镜像**：<https://universe.roboflow.com/mar20/mar20-s3e1w>
-- **内容**：3,842 张高分辨率遥感图 / 22,341 实例 / 20 类军机，取自全球 60 个军用机场（Google Earth），HBB + OBB 双标注
-- **用途**：机群集结、机场活动异常
+7,985 张标注图 / 14,018 实例，4 类：tank、drone、people、soldier，航拍视角。
+**唯一「军事目标 + 航拍视角 + bbox」三者齐全**的公开集。
+
+网页直接点下载，不用注册、不用网盘。体积小、格式简单，最适合拿来跑通全链路。
+
+```bash
+python tools/prepare.py mendeley --root data/raw/mendeley --out data/interim/mendeley.jsonl
+```
+
+⚠️ 标注格式官方未声明，适配器会自动探测 coco/voc/yolo 并打印识别结果。含合成增强图，会自动标 `meta.synthetic`。
+
+## 2. MAR20
+
+- 官方：<https://gcheng-nwpu.github.io/>（西北工业大学，可能是百度网盘）
+- YOLO 镜像：<https://universe.roboflow.com/mar20/mar20-s3e1w>（Roboflow，需注册但下载方便）
+
+3,842 张高分辨率遥感图 / 22,341 实例 / 20 类军机，取自全球 60 个军用机场（Google Earth），HBB + OBB 双标注。
+
+```bash
+python tools/prepare.py mar20 --root data/raw/MAR20 --out data/interim/mar20.jsonl
+# Roboflow 的 YOLO 版:
+python tools/prepare.py mar20 --root data/raw/MAR20 --format yolo --classes classes.txt --out ...
+```
+
+## 3. FASDD_UAV
+
+<https://www.scidb.cn/en/detail?dataSetId=ce9c9400b44148e1b0a749f5c3eb0bda>
+
+⚠️ **只下 `FASDD_UAV.zip`**，另两个（`FASDD_CV` 通用视角、`FASDD_RS` 遥感）本项目用不到。
+FASDD_UAV 含 36,308 个火焰实例 + 17,222 个烟雾实例。
+
+💡 标注同时提供 YOLO / VOC / COCO / TDML 四种格式，适配器直接取 COCO 子目录。
+
+## 4. ERA + CapERA
+
+- ERA：<https://lcmou.github.io/ERA_Dataset/> · 备用 <https://ieee-dataport.org/open-access/era-dataset>
+- CapERA：<https://github.com/yakoubbazi/CapEra>
+
+2,864 段视频，每段 5 秒 / 30fps / 640×640，25 类事件。CapERA 给每段补 5 条人工 caption。
+
+⚠️ **CapERA 只有标注文件，视频要用 ERA 的**，所以 ERA 必须先下。
+⚠️ 抽帧需要 `ffmpeg`（`apt-get install -y ffmpeg`）或 `pip install opencv-python`。
+
+## 5. DroneCrowd
+
+<https://github.com/VisDrone/DroneCrowd>
+
+112 段 / 33,600 帧 1920×1080 / 480 万人头点 / 20,800 条轨迹。
+
+⚠️ 标注是**人头点**不是 bbox。发布形态可能是 `.mat`（需 `pip install scipy`）或 txt，两种都支持。
+⚠️ 相邻帧几乎全是近重复，务必按 stride 稀疏抽（默认每 30 帧取 1）。
+
+## 6. VisDrone DET + MOT
+
+<https://github.com/VisDrone/VisDrone-Dataset>
+
+**两个子集都要下**：
+
+- `VisDrone2019-DET`（train/val）—— 航拍 bbox 底座与正常场景负样本
+- `VisDrone2019-MOT`（train/val）—— 带 track_id，**越界移动的唯一来源**
+
+## 7. DOTA v2.0
+
+<https://captain-whu.github.io/DOTA/dataset.html>
+
+188,282 实例 / 15 类 / OBB。⚠️ 原图可达 20000×20000，**必须先切片**（`prepare.py dota` 会自动做，默认 1024/overlap 200）。切片会额外占磁盘，预留 2 倍空间。
+
+## 8. Drone-Anomaly
+
+<https://github.com/Jin-Pu/Drone-Anomaly>
+
+7 个场景，37 训练 / 22 测试视频序列，51,635 + 35,853 帧，640×640。
+按设计**只取正常帧**（其异常类型与本项目 4 类不匹配，详见 09 号文档）。
+
+## 9. UCF-Crime / XD-Violence + HIVAU-70k
+
+- HIVAU-70k 标注：<https://github.com/pipixin321/HolmesVAU>
+- HF 预处理版：`backseollgi/HIVAU-70k_UCF-Crime`、`backseollgi/HIVAU-70k_XD-Violence`
+- UCF-Crime 视频：<https://www.crcv.ucf.edu/projects/real-world/>（1,900 段 / 128 小时）
+- XD-Violence 视频：<https://roc-ng.github.io/XD-Violence/>（4,754 段 / 217 小时）
+
+💡 **先只下 HuggingFace 的预处理版**，它已经切好片段。够用就不必下 345 小时的原始视频，
+能省几百 GB 磁盘和大量下载时间。确实需要原始视频时再补。
 
 ---
 
-## C 组 · 专项
-
-### 7. FASDD_UAV（烟雾火焰，无人机视角）
-- **地址**：<https://www.scidb.cn/en/detail?dataSetId=ce9c9400b44148e1b0a749f5c3eb0bda>
-- **只下 `FASDD_UAV.zip`**，另两个（`FASDD_CV` 通用视角、`FASDD_RS` 遥感）暂不需要
-- **内容**：36,308 个火焰实例 + 17,222 个烟雾实例
-- 💡 标注同时提供 **YOLO / VOC / COCO / TDML** 四种格式，直接取 COCO 版喂 `adapters.py coco`
-
-### 8. DOTA v2.0（遥感俯视，集结派生）
-- **地址**：<https://captain-whu.github.io/DOTA/dataset.html>
-- **内容**：188,282 实例 / 15 类 / OBB 标注
-- **要什么**：`plane`、`ship`、`large-vehicle`、`small-vehicle`、`helicopter` 这几类，其余（球场、泳池等）可在归一化时过滤
-- ⚠️ 原图尺寸极大（可达 20000×20000），**必须先切片**（官方提供 `DOTA_devkit` 的 `ImgSplit`），建议 1024×1024 / overlap 200
-
-### 9. Drone-Anomaly（同场景正常/异常配对）
-- **仓库**：<https://github.com/Jin-Pu/Drone-Anomaly>
-- **内容**：7 个场景，37 训练 / 22 测试视频序列，51,635 + 35,853 帧，640×640
-- **价值**：**负样本金矿**——同一场景的正常段与异常段成对，训练"不乱报警"全靠它
-
----
-
-## 工具性数据集（不当训练源，但要用）
+## 混入数据集（不是源数据）
 
 | 数据集 | 地址 | 用途 |
 |---|---|---|
-| **UCA** | <https://xuange923.github.io/Surveillance-Video-Understanding> | 用它 0.1 秒精度的事件边界，从异常视频切出干净正常段做困难负样本 |
-| **VRSBench** | <https://huggingface.co/datasets/xiang709/VRSBench> | 按 10% 混入训练防遗忘，顺带提供 grounding 范式 |
-| **MOCO** | <https://github.com/Panlizhi/MOCO> | **申请制**，现在就发申请，批下来直接加入 B 组 |
+| **VRSBench** | <https://huggingface.co/datasets/xiang709/VRSBench> | 按 10% 混入训练防灾难性遗忘，顺带提供 grounding 范式 |
+| **MOCO** | <https://github.com/Panlizhi/MOCO> | **申请制**，现在就发申请，批下来加入 B 组，不阻塞当前进度 |
 
 ---
 
-## 下载顺序与磁盘预算
+## 建议顺序与磁盘预算
 
-按这个顺序下，任何一步卡住都不影响前面的成果：
+**先下 1、2、3**（Mendeley、MAR20、FASDD_UAV）：体量小、都是静态图、不需要 ffmpeg，
+下完就能跑通 `prepare → derive_events → screen → make_golden → build_vqa` 全链路，
+先验证流程再投入大数据集。
 
-| 顺序 | 数据集 | 体量估计 | 说明 |
-|---|---|---|---|
-| 1 | Mendeley 军事目标 | 小（< 5 GB） | 最快见效，立刻能跑通 adapters → QA 全链路 |
-| 2 | MAR20 | 小 | 同上 |
-| 3 | ERA + CapERA | 中 | 骨架第一块，抽完帧就能出第一批带描述的数据 |
-| 4 | FASDD_UAV | 中 | 烟雾类一次到位 |
-| 5 | VisDrone DET + MOT | 中 | 越界派生依赖它 |
-| 6 | Drone-Anomaly | 中 | 负样本 |
-| 7 | DOTA v2.0 | 大（切片后更大） | 留到最后，切片耗时 |
-| 8 | HIVAU-70k（先 HF 预处理版） | 视是否下原始视频而定 | **先别下 UCF-Crime/XD-Violence 原始视频**，345 小时，几百 GB |
+之后按 4→5→6→8→7→9 补齐。
 
-**磁盘预算**：不下 UCF-Crime/XD-Violence 原始视频的话，全部约 **150–250 GB**；下了则要预留 **500 GB 以上**。远程环境磁盘有限，建议 1–7 先跑通，HIVAU 的视频本体放到最后按需补。
+**磁盘预算**：不下 UCF-Crime / XD-Violence 原始视频约 **150–250 GB**（含 DOTA 切片），
+下了则要预留 **500 GB 以上**。
 
-下载建议用 `aria2c -x 16 -s 16` 或 `wget -c`（支持断点续传），大文件被中断重来很浪费时间。
+下载用 `aria2c -x 16 -s 16 <url>` 或 `wget -c <url>`（支持断点续传），大文件中断重来很浪费时间。
