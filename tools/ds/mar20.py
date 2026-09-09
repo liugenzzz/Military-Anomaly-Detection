@@ -21,7 +21,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ds.common import image_size, iter_images, parse_voc_xml, parse_yolo_txt
+from ds.common import (collapse_roboflow_augment, image_size, iter_images,
+                       parse_voc_xml, parse_yolo_txt, roboflow_base)
 from scene import Obj, Scene
 
 DATASET = "MAR20"
@@ -75,7 +76,7 @@ def _find_xml(ann_root: Path, stem: str) -> Path | None:
 
 def build(root: str, img_dir: str | None = None, ann_dir: str | None = None,
           fmt: str = "voc", classes_file: str | None = None,
-          view: str = "satellite") -> list[Scene]:
+          view: str = "satellite", keep_augmented: bool = False) -> list[Scene]:
     r = Path(root)
     imgs_root = Path(img_dir) if img_dir else (r / "JPEGImages" if (r / "JPEGImages").is_dir() else r)
     ann_root = Path(ann_dir) if ann_dir else (r / "Annotations" if (r / "Annotations").is_dir() else r)
@@ -87,8 +88,15 @@ def build(root: str, img_dir: str | None = None, ann_dir: str | None = None,
             print(f"[warn] {DATASET}: 未找到类别文件(classes.txt / data.yaml), "
                   f"类名将退化为 class_0/class_1..., 请用 --classes 指定")
 
+    imgs = iter_images(imgs_root)
+    if not keep_augmented:
+        imgs, n_collapsed = collapse_roboflow_augment(imgs)
+        if n_collapsed:
+            print(f"[{DATASET}] Roboflow 增强副本已折叠: 去掉 {n_collapsed} 张, "
+                  f"保留 {len(imgs)} 张源图(同一源图的翻转/旋转副本只留一份)")
+
     scenes, missing = [], 0
-    for img in iter_images(imgs_root):
+    for img in imgs:
         w, h = image_size(img)
         raw: list[tuple[str, list[float]]] = []
         if fmt == "voc":
@@ -111,10 +119,14 @@ def build(root: str, img_dir: str | None = None, ann_dir: str | None = None,
             cls, model = _norm(name)
             objs.append(Obj(id=i, cls=cls, bbox=bbox,
                             attrs={"model": model} if model else {}))
-        scenes.append(Scene(image_id=f"{DATASET}_{img.stem}", image_path=str(img),
+        scenes.append(Scene(image_id=f"{DATASET}_{roboflow_base(img.stem)}", image_path=str(img),
                             width=w or 1024, height=h or 1024,
                             source_dataset=DATASET, license=LICENSE, view=view,
                             objects=objs, meta={"airport_scene": True}))
     if missing:
         print(f"[warn] {DATASET}: {missing} 张图找不到对应标注, 已按无标注处理")
+    sizes = {(s.width, s.height) for s in scenes}
+    if len(sizes) == 1 and next(iter(sizes)) in {(640, 640), (416, 416)}:
+        print(f"[warn] {DATASET}: 所有图尺寸均为 {next(iter(sizes))}, 说明该版本做了 Resize。"
+              f"遥感小目标会被压糊, 不适合 grounding 训练 —— 建议换无 resize 的版本或官方原版")
     return scenes

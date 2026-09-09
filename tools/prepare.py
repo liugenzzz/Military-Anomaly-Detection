@@ -61,6 +61,8 @@ def main() -> None:
     p.add_argument("--img-dir"); p.add_argument("--ann-dir")
     p.add_argument("--format", dest="fmt", default="voc", choices=["voc", "yolo"])
     p.add_argument("--classes"); p.add_argument("--view", default="satellite")
+    p.add_argument("--keep-augmented", action="store_true",
+                   help="保留 Roboflow 的增强副本(默认折叠, 同一源图只留一份)")
     add_out(p)
 
     p = sub.add_parser("mendeley", help="Mendeley UAV 军事目标(自动探测格式)")
@@ -151,7 +153,8 @@ def main() -> None:
         return
 
     if a.cmd == "mar20":
-        scenes = mar20.build(a.root, a.img_dir, a.ann_dir, a.fmt, a.classes, a.view)
+        scenes = mar20.build(a.root, a.img_dir, a.ann_dir, a.fmt, a.classes, a.view,
+                             keep_augmented=a.keep_augmented)
     elif a.cmd == "mendeley":
         scenes = mendeley_mil.build(a.root, a.fmt, a.classes, a.view,
                                     tuple(a.keep_classes) if a.keep_classes else None)

@@ -35,6 +35,24 @@ def iter_images(root: str | Path, recursive: bool = True) -> list[Path]:
     return sorted(x for x in it if x.suffix.lower() in IMG_EXT)
 
 
+def roboflow_base(stem: str) -> str:
+    """Roboflow 导出的文件名形如 <原名>_jpg.rf.<32位hash>.jpg。
+
+    同一张源图的多个增强副本(翻转/旋转/调色)**共享 `.rf.` 之前的前缀**,
+    据此可以精确还原到原图集合。这比按图像哈希去重可靠 —— dHash 对水平翻转
+    不是不变的, 抓不到翻转副本。
+    """
+    return stem.split(".rf.")[0] if ".rf." in stem else stem
+
+
+def collapse_roboflow_augment(paths: list[Path]) -> tuple[list[Path], int]:
+    """每个源图只保留一个副本。返回 (保留的文件, 折叠掉的数量)。"""
+    seen: dict[str, Path] = {}
+    for p in sorted(paths):
+        seen.setdefault(roboflow_base(p.stem), p)
+    return list(seen.values()), len(paths) - len(seen)
+
+
 def iter_videos(root: str | Path) -> list[Path]:
     return sorted(x for x in Path(root).rglob("*") if x.suffix.lower() in VID_EXT)
 

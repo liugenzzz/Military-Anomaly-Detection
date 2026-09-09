@@ -38,9 +38,26 @@ python tools/prepare.py mar20 --root data/raw/MAR20 --format yolo --out ...     
 **Pascal VOC**（适配器默认格式）→ 「Download zip」或「Show download code」拿到 curl 命令。
 需要一个免费账号。服务器上直接跑那条 `curl -L "https://universe.roboflow.com/ds/XXX?key=YYY" > roboflow.zip` 最省事。
 
-⚠️ **选版本时必看 Preprocessing**：Roboflow 常见默认是 Resize 到 640×640，而 MAR20 是高分辨率
-遥感图、飞机只占几十像素，压缩后小目标糊掉，不能用于 grounding。要挑 Preprocessing 无 Resize、
-Augmentation 为 `No augmentations applied` 的版本。**都做了 resize 就改用官方原版。**
+**Roboflow 三个版本怎么选（已核对）**：
+
+| 版本 | 图片数 | 预处理 | 判断 |
+|---|---|---|---|
+| v1 | 3,842 | 640×640 Stretch | ❌ 压缩，小目标糊 |
+| v2 | 9,222 | 640×640 Stretch | ❌ 压缩 + 增强 |
+| **v3** | 9,222 | **无 resize** | ✅ **选这个** |
+
+⚠️ **唯一重要的标准是有没有 Resize**。MAR20 是高分辨率遥感图、飞机只占几十像素，
+压到 640×640 后小目标糊掉，不能用于 grounding 训练。
+
+v3 的 9,222 张是 3 倍增强的结果：原始 3,842 按 88/8/4 切成 train 2,690 / valid 768 / test 384，
+train 增强 ×3 = 8,070，`8070 + 768 + 384 = 9222`。增强副本是同一张图的翻转/旋转/调色版本，
+图片数虚高但信息量没涨，且同一场景的多个副本会分散到 train/test 两侧造成指标虚高。
+
+**适配器默认会折叠这些副本**（Roboflow 的增强副本共享 `.rf.` 之前的文件名前缀，据此精确还原
+到 3,842 张源图）。这比按图像哈希去重可靠——dHash 对水平翻转不是不变的，抓不到翻转副本。
+想保留增强用 `--keep-augmented`。
+
+适配器还会检查：若所有图尺寸都是 640×640，会告警提示该版本做了 Resize。
 
 ## 2. Mendeley UAV 军事目标 ⚠️ 降级为补充，只取 tank
 
