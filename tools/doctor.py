@@ -19,13 +19,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 IMG = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
 VID = (".mp4", ".avi", ".mkv", ".mov", ".flv", ".webm", ".mpg", ".m4v")
 
-# 数据集名 -> (目录名候选, 供哪个异常类, 是不是单点依赖)
+# 数据集名 -> (目录名候选, 供哪个异常类, 是不是单点依赖[, 是否只有标注])
 SPEC = {
     "MAR20": (["MAR20"], "massing/equipment", False),
     "Mendeley-UAV-Military": (["Mendeley-UAV-Military", "mendeley"], "massing/equipment", False),
     "FASDD_UAV": (["FASDD_UAV", "FASDD"], "smoke + explosion", True),
     "ERA": (["ERA"], "massing/personnel + explosion + normal", False),
-    "CapERA": (["CapERA", "CapEra"], "描述语料", False),
+    # 第四项 annotation_only: 这类数据集本来就只有标注文件(CapERA 的视频复用 ERA),
+    # 不能按"有没有图像"来判断是否可用
+    "CapERA": (["CapERA", "CapEra"], "描述语料", False, True),
     "DroneCrowd": (["DroneCrowd"], "massing/personnel", False),
     "VisDrone-MOT": (["VisDrone2019-MOT-train", "VisDrone-MOT", "VisDrone"], "border_crossing", True),
     "VisDrone-DET": (["VisDrone2019-DET-train", "VisDrone-DET"], "normal", False),
@@ -137,7 +139,9 @@ def main() -> None:
 
     ready, blocked = [], []
     print(f"扫描 {root}\n" + "═" * 78)
-    for name, (dirs, feeds, critical) in SPEC.items():
+    for name, spec in SPEC.items():
+        dirs, feeds, critical = spec[0], spec[1], spec[2]
+        ann_only = spec[3] if len(spec) > 3 else False
         d = _find(root, dirs)
         mark = "★" if critical else " "
         if d is None:
@@ -154,6 +158,14 @@ def main() -> None:
         has_arch = arch.is_dir() and any(arch.iterdir())
         detail = f"{n_img} 图 / {n_vid} 视频 / {n_ann} 标注文件"
 
+        if ann_only:
+            if n_ann > 2:
+                print(f"{mark} {name:24s} ✓ {n_ann} 个标注文件（本数据集不含图像，媒体复用其他集）")
+                ready.append((name, feeds))
+            else:
+                print(f"{mark} {name:24s} ✗ 标注文件不足   ({detail})")
+                blocked.append((name, feeds, critical, "标注缺失"))
+            continue
         if n_img == 0 and n_vid == 0:
             if has_arch and subdirs <= {"archives"}:
                 sizes = sum(f.stat().st_size for f in arch.rglob("*") if f.is_file())

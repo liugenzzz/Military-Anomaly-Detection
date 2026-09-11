@@ -59,7 +59,31 @@ SPLIT_DIRS = {"train", "training", "trainval", "test", "testing", "val", "valida
 
 
 def _norm_label(name: str) -> str:
-    return re.sub(r"[\s\-]+", "_", name.strip().lower())
+    """把类别名归一到"去掉所有分隔符的小写"。
+
+    ERA 实际发布的目录名是驼峰式(CarRacing / ParadeProtest / TrafficCollision),
+    而论文与多数镜像写作下划线或空格形式。只替换空格与连字符的话, 驼峰名会原样
+    保留成 carracing, 与映射表里的 car_racing 对不上 —— 实测因此漏掉 682 段视频,
+    其中 ParadeProtest 与 ReligiousActivity 本该计入人员聚集,
+    TrafficCollision / PostEarthquake / CarRacing 本该被排除。
+    剥掉所有非字母数字字符, 三种写法就都能对上。
+    """
+    return re.sub(r"[^a-z0-9]", "", name.strip().lower())
+
+
+def _canon(d: dict | set) -> dict | set:
+    """把映射表的键也归一到同一形式。"""
+    if isinstance(d, dict):
+        return {_norm_label(k): v for k, v in d.items()}
+    return {_norm_label(k) for k in d}
+
+
+# 三张映射表统一归一, 这样源文件里仍可写成可读的 parade_protest,
+# 而与磁盘上的 ParadeProtest 能对上
+ANOMALY = _canon(ANOMALY)
+NORMAL = _canon(NORMAL)
+EXCLUDE = _canon(EXCLUDE)
+SPLIT_DIRS = _canon(SPLIT_DIRS)
 
 
 def _class_dirs(root: Path) -> list[Path]:
