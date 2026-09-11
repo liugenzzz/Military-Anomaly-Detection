@@ -275,16 +275,86 @@ def derive(scenes: list[Scene], ontology: dict[str, Any], overwrite: bool = Fals
     return scenes
 
 
+def _class_key(e: Event) -> str:
+    return e.type + (f"/{e.evidence['subtype']}" if "subtype" in e.evidence else "")
+
+
+def relax_pass(scenes: list[Scene], ontology: dict[str, Any], below: int,
+               max_ratio: float = 0.5) -> dict[str, int]:
+    """补量: 只对产量不够的类别启用 relax 档, 且只在还没出事件的图上跑。
+
+    「多的筛精、少的放宽」里放宽的这一半。要点有三:
+      1. 只放宽不够的类 —— explosion/smoke 本来就富余, 放宽只会拉低质量;
+      2. 放宽出来的事件打 relaxed 标记, 下游答案改用"小规模/迹象"这类说法,
+         不冒充典型样本;
+      3. 补量上限 max_ratio: 放宽样本最多占该类的一半, 否则这一类的分布
+         会被边缘样本主导, 模型学到的就是"稍微聚一下就算集结"。
+    """
+    rules = [(c, st, r) for c, st, r in collect_rules(ontology) if r.get("relax")]
+    if not rules:
+        return {}
+    have: dict[str, int] = {}
+    for s in scenes:
+        for k in {_class_key(e) for e in s.events}:
+            have[k] = have.get(k, 0) + 1
+
+    added: dict[str, int] = {}
+    for cls_id, subtype, rule in rules:
+        key = cls_id + (f"/{subtype}" if subtype else "")
+        cur = have.get(key, 0)
+        if cur >= below:
+            continue
+        budget = int(max(below - cur, 0) if cur == 0 else
+                     min(below - cur, cur * max_ratio / (1 - max_ratio)))
+        if budget <= 0:
+            continue
+        merged = {**rule, **rule["relax"]}
+        merged.pop("relax", None)
+        merged.pop("on_require_fail", None)   # 放宽档不再制造困难负样本, 避免与严格档打架
+        n = 0
+        for scene in scenes:
+            if n >= budget:
+                break
+            if any(_class_key(e) == key for e in scene.events):
+                continue                       # 严格档已经命中, 不重复补
+            evs = _DISPATCH[merged["kind"]](scene, merged, cls_id, subtype)
+            if not evs:
+                continue
+            for ev in evs:
+                ev.evidence["relaxed"] = True
+                ev.conf = round(ev.conf * 0.7, 3)
+                scene.events.append(ev)
+            scene.meta.pop("hard_negative", None)
+            scene.meta.pop("hard_negative_reason", None)
+            n += 1
+        if n:
+            added[key] = n
+    return added
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="从检测/跟踪标注派生异常事件标签")
     ap.add_argument("--scenes", required=True, help="输入 scene jsonl")
     ap.add_argument("--out", required=True, help="输出 scene jsonl")
     ap.add_argument("--ontology", default="configs/ontology.yaml")
     ap.add_argument("--overwrite", action="store_true", help="丢弃已有的规则派生事件后重算")
+    ap.add_argument("--relax-below", type=int, default=0,
+                    help="产量低于这个图数的类别启用 ontology 里的 relax 档补量, "
+                         "0 表示不补。补出来的事件带 relaxed 标记")
+    ap.add_argument("--relax-max-ratio", type=float, default=0.5,
+                    help="放宽样本在该类中的占比上限, 默认最多一半")
     args = ap.parse_args()
 
     ontology = yaml.safe_load(Path(args.ontology).read_text(encoding="utf-8"))
     scenes = derive(load_scenes(args.scenes), ontology, args.overwrite)
+    if args.relax_below:
+        added = relax_pass(scenes, ontology, args.relax_below, args.relax_max_ratio)
+        if added:
+            print("放宽档补量(仅限产量不够的类, 事件标 relaxed):")
+            for k, v in sorted(added.items(), key=lambda kv: -kv[1]):
+                print(f"  {k:24s} +{v}")
+        else:
+            print("放宽档未启用: 各类产量都够, 或没有可补的图")
     dump_scenes(scenes, args.out)
 
     hist: dict[str, int] = {}

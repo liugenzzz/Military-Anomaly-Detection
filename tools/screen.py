@@ -287,8 +287,15 @@ def main() -> None:
     else:
         kept = [s for s, _ in staged]
 
+    # 把像素质量指标留在 meta 里: 后面按配额下采样时要"多的筛精",
+    # 得有个客观依据决定留哪张, 重算一遍全量 stats 太贵。
+    stats_by_id = {id(s): st for s, st in staged if st}
     for s in kept:
         by_ds_kept[s.source_dataset] += 1
+        if (st := stats_by_id.get(id(s))):
+            s.meta["q"] = {"blur": round(float(st["blur"]), 1),
+                           "std": round(float(st["std"]), 1),
+                           "bright": round(float(st["brightness"]), 1)}
 
     out = Path(args.out_dir)
     dump_scenes(kept, out / "scenes_kept.jsonl")

@@ -18,6 +18,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ds.boxes import BBOX_SCALE, COORD_MODE, box_json, boxes_json, to_bbox2d  # noqa: E402
+from derive_events import _side  # noqa: E402  越界方向判定, 与派生端共用一份实现
 from facets import load_all, load_tool  # noqa: E402
 from scene import Obj, Scene, load_scenes  # noqa: E402
 
@@ -25,7 +26,13 @@ from scene import Obj, Scene, load_scenes  # noqa: E402
 RULE_QUOTA = {"judge": 0.15, "locate": 0.12, "count": 0.05}
 LOCATE_VERBAL_RATIO = 0.70      # 定位任务里方位指代占七成, 坐标占三成
 NEGATION_RATIO = 0.20           # 每类任务的否定变体占比
-TWO_TURN_RATIO = 0.30           # 规则侧的双轮占比
+TWO_TURN_RATIO = 0.30           # 规则侧的多轮占比
+THREE_TURN_RATIO = 0.35         # 多轮里再有三成半追到第三轮("依据是什么")
+COUNT_BOX_RATIO = 0.25          # 计数题里四分之一要求逐个框出
+COMPOSE_RATIO = 0.30            # 目标构成(哪几类各多少)
+COMPARE_RATIO = 0.25            # 左右/上下密度对比
+CORRECT_RATIO = 0.30            # 纠错题(给错误陈述让模型推翻)
+TEMPORAL_RATIO = 0.60           # 时序题。只有带轨迹的视频/多帧能出, 条件本就少, 配比给高
 
 MEASURE = {"military-plane": "架", "civil-plane": "架", "plane": "架",
            "military-helicopter": "架", "civil-helicopter": "架", "helicopter": "架",
@@ -108,6 +115,15 @@ def position_text(bbox: list[float], W: int, H: int, granularity: str, rng: rand
     prox = "紧贴" if d < 0.05 else "靠近"
     tail = rng.choice([f"，与画面{far}之间留有较大空白", "", f"，距画面{far}较远"])
     return f"{prox}画面{near}，位于{_zone(cx, cy)}{tail}，{occupy}。"
+
+
+def _region_zh(ev: dict[str, Any]) -> str:
+    """禁区名往往是 restricted_zone_A 这种英文标识, 直接塞进中文答案会很突兀。
+    有中文名就用中文名, 没有就按区域类型给一个通名。"""
+    name = str(ev.get("region") or "")
+    if name and any("\u4e00" <= ch <= "\u9fff" for ch in name):
+        return name
+    return "禁区边界" if ev.get("region_type") == "polygon" else "界线"
 
 
 # ---------------------------------------------------------------- 生成器
@@ -195,8 +211,14 @@ class RuleBuilder:
                             for o in s.objects), key=lambda kv: kv[1], default=None)
                 if main:
                     cls_hint = f"{n}{MEASURE.get(main[0], '个')}{CLS_ZH.get(main[0], main[0])}"
-            lead = self.rng.choice(["存在异常，为", "画面中出现异常：", "判定为",
-                                    "有异常。类型为"])
+            # 放宽档补出来的事件措辞要留余地: 它本来就是够不上严格阈值才被捡回来的,
+            # 用"判定为集结"这种确定语气去训, 等于教模型把小规模聚集当成集结
+            if s.events and all(e.evidence.get("relaxed") for e in s.events):
+                lead = self.rng.choice(["存在需要留意的迹象，倾向于", "有轻度异常迹象，疑似",
+                                        "初步判断为", "存在苗头，可能属于"])
+            else:
+                lead = self.rng.choice(["存在异常，为", "画面中出现异常：", "判定为",
+                                        "有异常。类型为"])
             tail = ""
             if cls_hint:
                 tail = self.rng.choice([
@@ -204,7 +226,11 @@ class RuleBuilder:
                     f"共观察到 {cls_hint}，成簇分布。",
                     f"涉及 {cls_hint}。",
                 ])
-            need = self.rng.choice(["", "建议上报并持续观察。", "建议持续观察。", ""])
+            if s.events and all(e.evidence.get("relaxed") for e in s.events):
+                need = self.rng.choice(["规模有限，建议继续观察确认。", "尚未达到典型规模，建议复核。",
+                                        "证据强度一般，建议结合后续画面判断。"])
+            else:
+                need = self.rng.choice(["", "建议上报并持续观察。", "建议持续观察。", ""])
             a = f"{lead}{self._anomaly_zh(s)}。{tail}{need}"
         elif s.meta.get("hard_negative"):
             by: dict[str, int] = {}
@@ -273,26 +299,189 @@ class RuleBuilder:
         if style < 0.45:
             return self._ask("negation", zh=self.zh[t]), f"否，未观察到{self.zh[t]}的迹象。"
         if style < 0.75:
-            return (self._ask("locate_verbal", zh=self.zh[t]),
-                    f"画面中未发现{self.zh[t]}，无从指出其方位。")
+            named = [ln for ln in self.asks["locate_verbal"].lines if "{zh}" in ln]
+            if named:
+                q = self.rng.choice(named).replace("{zh}", self.zh[t])
+                return q, f"画面中未发现{self.zh[t]}，无从指出其方位。"
         cls = self.rng.choice(["tank", "warship", "military-plane"])
         if any(o.cls == cls for o in s.objects):
             return self._ask("negation", zh=self.zh[t]), f"否，未观察到{self.zh[t]}的迹象。"
         return (self._ask("count", mw=MEASURE.get(cls, "个"), label=CLS_ZH[cls]),
                 f"0{MEASURE.get(cls, '个')}。")
 
+    # -------------------------------------------------- 扩充题型
+    def _class_counts(self, s: Scene) -> list[tuple[str, int]]:
+        by: dict[str, int] = {}
+        for o in s.objects:
+            by[o.cls] = by.get(o.cls, 0) + 1
+        return sorted(by.items(), key=lambda kv: -kv[1])
+
+    def _phrase(self, cls: str, n: int) -> str:
+        return f"{CLS_ZH.get(cls, cls)} {n} {MEASURE.get(cls, '个')}"
+
+    def compose(self, s: Scene) -> tuple[str, str] | None:
+        """目标构成: 哪几类、各多少。答案逐类由标注算出, 不做任何推断。"""
+        cc = self._class_counts(s)
+        if len(cc) < 2:
+            return None                      # 只有一类就退化成 count 了
+        total = sum(n for _, n in cc)
+        body = "；".join(self._phrase(c, n) for c, n in cc[:6])
+        tail = "。" if len(cc) <= 6 else f"；其余 {len(cc) - 6} 类数量较少。"
+        return self._ask("compose"), f"画面中共 {total} 个目标：{body}{tail}"
+
+    def compare(self, s: Scene) -> tuple[str, str] | None:
+        """左右(或上下)对比。答案是数出来的, 差距在一成以内如实说"基本均衡"。"""
+        if len(s.objects) < 4:
+            return None
+        axis = self.rng.choice(["h", "v"])
+        if axis == "h":
+            a_zh, b_zh, mid = "左半区", "右半区", s.width / 2
+            na = sum(1 for o in s.objects if o.center[0] < mid)
+        else:
+            a_zh, b_zh, mid = "上半区", "下半区", s.height / 2
+            na = sum(1 for o in s.objects if o.center[1] < mid)
+        nb = len(s.objects) - na
+        q = self._ask("compare", a=a_zh, b=b_zh)
+        if abs(na - nb) <= max(1, round(len(s.objects) * 0.1)):
+            return q, f"两侧基本均衡：{a_zh} {na} 个目标，{b_zh} {nb} 个，数量接近。"
+        hi, lo = (a_zh, b_zh) if na > nb else (b_zh, a_zh)
+        return q, f"{hi}更密集：{a_zh} {na} 个目标，{b_zh} {nb} 个，主要集中在{hi}。"
+
+    def correct(self, s: Scene) -> tuple[str, str] | None:
+        """纠错题: 给一句陈述让模型判断真伪。
+
+        **三成给的是真陈述**。全给假的, 模型会学成"凡是被问就否定",
+        换个正确说法它照样推翻, 这比附和还糟。
+        """
+        cc = self._class_counts(s)
+        if not cc:
+            return None
+        cls, n = cc[0]
+        mw, zh = MEASURE.get(cls, "个"), CLS_ZH.get(cls, cls)
+        if self.rng.random() < 0.3:                       # 真陈述
+            claim = f"画面中有 {n} {mw}{zh}"
+            return self._ask("correct", claim=claim), f"说法属实，画面中确为 {n} {mw}{zh}。"
+        style = self.rng.random()
+        if style < 0.5:                                   # 数量错
+            delta = self.rng.choice([-3, -2, -1, 1, 2, 3, 5])
+            wrong = max(0, n + delta)
+            if wrong == n:
+                wrong = n + 1
+            claim = f"画面中有 {wrong} {mw}{zh}"
+            return (self._ask("correct", claim=claim),
+                    f"不对。{zh}的数量是 {n} {mw}，不是 {wrong} {mw}。")
+        if style < 0.8 and self.enabled:                  # 异常类型错
+            absent = [c for c in self.enabled if c not in s.anomaly_types]
+            if absent:
+                t = self.rng.choice(absent)
+                claim = f"这张画面里正在发生{self.zh[t]}"
+                real = (f"实际的情况是{self._anomaly_zh(s)}" if s.anomaly_types
+                        else "画面属于正常态势，没有异常")
+                return (self._ask("correct", claim=claim),
+                        f"不对，未观察到{self.zh[t]}的迹象。{real}。")
+        rb = self._region_box(s)                          # 方位错
+        if rb is None:
+            return None
+        box, _ = rb
+        cx = (box[0] + box[2]) / 2
+        said = "右侧" if cx < s.width / 2 else "左侧"
+        real = "左侧" if said == "右侧" else "右侧"
+        claim = f"重点区域在画面{said}"
+        return (self._ask("correct", claim=claim),
+                f"不对，方位说反了。该区域位于画面{real}。")
+
+    def count_box(self, s: Scene) -> tuple[str, str] | None:
+        """计数 + 逐个框出。目标太多时不出这题 —— 框二十几个必然有错漏。"""
+        cc = self._class_counts(s)
+        if not cc:
+            return None
+        cls, n = cc[0]
+        if n > 12:
+            return None
+        objs = [o for o in s.objects if o.cls == cls]
+        mw, zh = MEASURE.get(cls, "个"), CLS_ZH.get(cls, cls)
+        q = self._ask("count_box", mw=mw, label=zh)
+        body = boxes_json([(to_bbox2d(o.bbox, s.width, s.height), zh) for o in objs])
+        return q, f"共 {n} {mw}{zh}。\n{body}"
+
+    def temporal(self, s: Scene) -> tuple[str, str] | None:
+        """时序题。**只出在视频/多帧上, 且只答轨迹能证明的事** ——
+        静态图问"什么时候开始的"必然只能靠编。"""
+        if s.modality not in ("video", "multi_image") or not s.tracks:
+            return None
+        cross = [e for e in s.events if e.evidence.get("rule") == "boundary_cross"]
+        if not cross:
+            return None
+        fracs = []
+        for e in cross:
+            pts = s.tracks.get(str(e.evidence.get("track_id")))
+            if not pts or len(pts) < 2:
+                continue
+            path = sorted(pts, key=lambda p: p[0])
+            reg = next((r for r in s.regions if r.name == e.evidence.get("region")), None)
+            if reg is None or len(reg.points) < 2:
+                continue
+            a, b = reg.points[0], reg.points[-1]
+            s0 = _side((path[0][1], path[0][2]), a, b)
+            for i, p in enumerate(path):
+                if _side((p[1], p[2]), a, b) != s0:
+                    fracs.append(i / max(1, len(path) - 1))
+                    break
+        if not fracs:
+            return None
+        f = sum(fracs) / len(fracs)
+        stage = "前段" if f < 0.34 else ("中段" if f < 0.67 else "后段")
+        who = CLS_ZH.get(cross[0].evidence.get("cls") or "", "目标")
+        n = len(fracs)
+        q = self._ask("temporal")
+        more = f"共 {n} 个目标先后越过。" if n > 1 else ""
+        return q, (f"越界发生在序列的{stage}（约第 {round(f * 100)}% 处）。"
+                   f"序列开始时{who}还在界线一侧，随后移动并跨过界线。{more}")
+
+    def why(self, s: Scene) -> str | None:
+        """多轮里的第三轮"依据是什么"。只复述证据字段, 不做任何延伸判断。"""
+        ev = self._cluster(s)
+        if ev:
+            n = ev.evidence.get("count")
+            cls = "、".join(CLS_ZH.get(c, c) for c in ev.evidence.get("classes", [])[:3])
+            if ev.evidence.get("relaxed"):
+                return (f"依据是目标的空间密度：{n} 个{cls or '目标'}聚成一簇，间距小于周边，"
+                        f"但规模不大，只能算{self.zh.get(ev.type, '该类异常')}的迹象，"
+                        f"还不足以下确定结论。")
+            return (f"依据是目标的空间密度：{n} 个{cls or '目标'}的间距明显小于画面中"
+                    f"其他区域，聚成一簇，规模已达到{self.zh.get(ev.type, '该类异常')}的判定条件。")
+        cross = next((e for e in s.events if e.evidence.get("rule") == "boundary_cross"), None)
+        if cross:
+            reg = _region_zh(cross.evidence)
+            return (f"依据是目标的运动轨迹：其路径与{reg}相交，"
+                    f"起点与终点分处界线两侧，构成跨越。")
+        if s.meta.get("hard_negative"):
+            rs = s.meta.get("hard_negative_reason") or []
+            return ("依据是目标性质：" + (rs[0] if rs else "成簇目标均为民用，不构成军事集结") +
+                    "，因此不按异常处置。")
+        if not s.anomaly_types:
+            return "依据是逐项排查的结果：目标分布稀疏、无烟火迹象、无跨界移动，各项均未触发。"
+        return None
+
     # -------------------------------------------------- 组装
     def build(self, s: Scene) -> list[dict]:
         out: list[dict] = []
         r = self.rng
 
-        # 判定 —— 每张图必出
+        # 判定 —— 每张图必出。三成走多轮, 多轮里再分两轮/三轮
         jq, ja = self.judge(s)
         if r.random() < TWO_TURN_RATIO:
             second = self.locate_verbal(s) if r.random() < LOCATE_VERBAL_RATIO else self.locate_box(s)
             if second:
-                out.append(self._mk(s, [(jq, ja), second], "judge+locate",
-                                    form="multi_turn"))
+                turns = [(jq, ja), second]
+                task = "judge+locate"
+                if r.random() < THREE_TURN_RATIO and (w := self.why(s)):
+                    turns.append((self._ask("why"), w))
+                    task = "judge+locate+why"
+                out.append(self._mk(s, turns, task, form="multi_turn"))
+            elif (w := self.why(s)):
+                out.append(self._mk(s, [(jq, ja), (self._ask("why"), w)],
+                                    "judge+why", form="multi_turn"))
             else:
                 out.append(self._mk(s, [(jq, ja)], "judge"))
         else:
@@ -305,9 +494,19 @@ class RuleBuilder:
         elif (t := self.locate_box_multi(s) or self.locate_box(s)):
             out.append(self._mk(s, [t], "locate_box"))
 
-        # 计数
-        if (t := self.count(s)):
+        # 计数 —— 少数走"计数+框出", 与纯计数错开
+        if r.random() < COUNT_BOX_RATIO and (t := self.count_box(s)):
+            out.append(self._mk(s, [t], "count_box"))
+        elif (t := self.count(s)):
             out.append(self._mk(s, [t], "count"))
+
+        # 构成 / 对比 / 纠错 / 时序 —— 各按配比抽, 抽不到条件就跳过, 不硬凑
+        for ratio, fn, name in ((COMPOSE_RATIO, self.compose, "compose"),
+                                (COMPARE_RATIO, self.compare, "compare"),
+                                (CORRECT_RATIO, self.correct, "correct"),
+                                (TEMPORAL_RATIO, self.temporal, "temporal")):
+            if r.random() < ratio and (t := fn(s)):
+                out.append(self._mk(s, [t], name))
 
         # 否定变体
         if r.random() < NEGATION_RATIO and (t := self.negation(s)):
@@ -316,6 +515,106 @@ class RuleBuilder:
 
 
 # ---------------------------------------------------------------- 切分
+def scene_quality(scenes: list[Scene]) -> dict[str, float]:
+    """给每个 scene 打一个 0~1 的质量分, 供"多的筛精"时排序用。
+
+    分数不跨数据源直接比: 卫星图天然锐利、夜间监控天然发糊, blur 的绝对值
+    在数据源之间没有可比性。所以清晰度与目标数都先在**本数据源内部**换算成
+    分位, 再加权 —— 比的是"在同源图里算不算好", 不是"比别的数据集清楚"。
+    """
+    by_src: dict[str, list[Scene]] = {}
+    for s in scenes:
+        by_src.setdefault(s.source_dataset, []).append(s)
+
+    def pct(vals: list[float]) -> dict[int, float]:
+        order = sorted(range(len(vals)), key=lambda i: vals[i])
+        return {idx: (rank / max(1, len(vals) - 1)) for rank, idx in enumerate(order)}
+
+    out: dict[str, float] = {}
+    for group in by_src.values():
+        blur_p = pct([float(s.meta.get("q", {}).get("blur", 0.0)) for s in group])
+        nobj_p = pct([float(min(len(s.objects), 60)) for s in group])
+        for i, s in enumerate(group):
+            conf = max((e.conf for e in s.events), default=0.0)
+            relaxed = any(e.evidence.get("relaxed") for e in s.events)
+            score = (0.35 * blur_p[i] + 0.25 * nobj_p[i] + 0.30 * conf
+                     + (0.10 if s.meta.get("hard_negative") else 0.0))
+            if relaxed:
+                score -= 0.20        # 有严格档样本可选时, 放宽出来的排后面
+            if s.meta.get("uncertain"):
+                score -= 0.10        # 闸5 判"不确定"的, 富余时优先让位
+            out[s.image_id] = round(max(0.0, min(1.0, score)), 4)
+    return out
+
+
+def apply_quota(samples: list[dict], target: int, seed: int = 0,
+                quality: dict[str, float] | None = None) -> list[dict]:
+    """按异常类配额: 多的筛精, 少的原样保留并在报告里点名缺口。
+
+    富余类不是随机丢, 是**按质量分排序后在各数据源之间轮着取**:
+      - 排序保证留下的是同源里最清晰、目标最多、事件置信度最高的那批;
+      - 轮取保证不会因为某个数据源又大又清晰, 就把这一类的名额全占了 ——
+        全来自一个数据源的 25000 条, 训出来的是那个数据源的模型。
+    下采样按 image_id 分组做, 不是逐条随机丢: 同一张图产出的几条 QA
+    要么一起留要么一起丢, 否则同图样本被拆散, 后面按组切 train/test 就不准了。
+    """
+    if target <= 0:
+        return samples
+    quality = quality or {}
+    by_cls: dict[str, list[dict]] = {}
+    for s in samples:
+        by_cls.setdefault("+".join(s["extra"]["anomaly"]), []).append(s)
+
+    rng = random.Random(seed)
+    out: list[dict] = []
+    report: list[tuple[str, int, int, float]] = []
+    for cls, group in by_cls.items():
+        tgt = target if cls != "normal" else int(target * len(by_cls) * 3 / 7)
+        if len(group) <= tgt:
+            out.extend(group)
+            report.append((cls, len(group), len(group), 0.0))
+            continue
+
+        by_img: dict[str, list[dict]] = {}
+        for s in group:
+            by_img.setdefault(s["extra"]["image_id"], []).append(s)
+        # 数据源 -> 该源的图, 按质量分从高到低
+        by_src: dict[str, list[str]] = {}
+        for img, rows in by_img.items():
+            by_src.setdefault(rows[0]["extra"].get("source_dataset", "?"), []).append(img)
+        for src in by_src:
+            by_src[src].sort(key=lambda k: (-quality.get(k, 0.5), k))
+
+        kept: list[dict] = []
+        picked_q: list[float] = []
+        cursors = {src: 0 for src in by_src}
+        srcs = sorted(by_src)
+        rng.shuffle(srcs)                       # 轮取的起点随机, 避免总是同一个源占先
+        while len(kept) < tgt and any(cursors[s] < len(by_src[s]) for s in srcs):
+            for src in srcs:
+                if cursors[src] >= len(by_src[src]) or len(kept) >= tgt:
+                    continue
+                img = by_src[src][cursors[src]]
+                cursors[src] += 1
+                kept.extend(by_img[img])
+                picked_q.append(quality.get(img, 0.5))
+        out.extend(kept)
+        report.append((cls, len(group), len(kept),
+                       sum(picked_q) / max(1, len(picked_q))))
+
+    print("\n按类别配额(规则侧):")
+    for cls, before, after, q in sorted(report, key=lambda r: -r[1]):
+        tgt = target if cls != "normal" else int(target * len(by_cls) * 3 / 7)
+        if after < tgt * 0.8:
+            print(f"  {cls:22s} {after:7d} / 目标 {tgt}   ❌ 缺口 {tgt - after}")
+        elif before > after:
+            print(f"  {cls:22s} {after:7d} / 目标 {tgt}   ✅ 从 {before} 择优保留"
+                  f"(留下的平均质量分 {q:.2f})")
+        else:
+            print(f"  {cls:22s} {after:7d} / 目标 {tgt}   ✅")
+    return out
+
+
 def split_by_group(samples: list[dict], ratios=(0.8, 0.1, 0.1), seed: int = 0):
     """按来源图/视频分组切分, 避免同源相邻帧跨集造成指标虚高。"""
     groups: dict[str, list[dict]] = {}
@@ -340,6 +639,9 @@ def main() -> None:
     ap.add_argument("--no-split", action="store_true")
     ap.add_argument("--exclude-ids", default=None,
                     help="golden set 的 image_id 清单, 必须排除否则泄漏")
+    ap.add_argument("--target-per-class", type=int, default=0,
+                    help="每个异常类的目标条数(规则侧配额, 0 表示不限)。"
+                         "富余的按图分组下采样, 不足的告警")
     args = ap.parse_args()
 
     onto = yaml.safe_load(Path(args.ontology).read_text(encoding="utf-8"))
@@ -352,6 +654,9 @@ def main() -> None:
         print(f"排除 golden set: {before} -> {len(scenes)} 个 scene")
 
     samples = [qa for s in scenes for qa in builder.build(s)]
+    if args.target_per_class:
+        samples = apply_quota(samples, args.target_per_class, args.seed,
+                              quality=scene_quality(scenes))
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 

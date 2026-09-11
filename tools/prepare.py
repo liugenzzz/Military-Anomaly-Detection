@@ -100,7 +100,7 @@ def main() -> None:
 
     p = sub.add_parser("dronecrowd", help="DroneCrowd 密集人群(点标注)")
     p.add_argument("--root", required=True)
-    p.add_argument("--ann-dir"); p.add_argument("--stride", type=int, default=30)
+    p.add_argument("--ann-dir"); p.add_argument("--stride", type=int, default=8)
     p.add_argument("--head-half", type=float, default=8.0)
     p.add_argument("--view", default="uav")
     add_out(p)
@@ -111,7 +111,7 @@ def main() -> None:
 
     p = sub.add_parser("visdrone-mot", help="VisDrone MOT 跟踪(越界派生, 支持自动放置边界)")
     p.add_argument("--root", required=True)
-    p.add_argument("--stride", type=int, default=30)
+    p.add_argument("--stride", type=int, default=8)
     p.add_argument("--boundaries", default=None, help='人工边界 json: {"序列名": [[x,y],...]}')
     p.add_argument("--no-auto-boundary", action="store_true")
     p.add_argument("--view", default="uav")

@@ -5,9 +5,29 @@
 #
 # 没下到的数据集会自动跳过并在末尾列出, 不会中断流程。
 set -uo pipefail
-DATA="${1:?用法: bash run_all.sh <数据根目录>}"
-OUT="${2:-data}"
+DATA="${1:?用法: bash run_all.sh <数据根目录> [输出目录]}"
+OUT="${2:-${OUT_DIR:-data}}"       # 输出目录: 第二个参数, 或环境变量 OUT_DIR
 PY="${PYTHON:-python3}"
+
+# ── LLM 生成: 配了端点就真跑, 没配就只导出请求(离线批推理也能吃这个文件)
+#   VLM_BASE_URL=http://127.0.0.1:8000/v1 VLM_MODEL=qwen2.5-vl-72b-instruct bash run_all.sh <数据根>
+VLM_BASE_URL="${VLM_BASE_URL:-}"
+VLM_MODEL="${VLM_MODEL:-Qwen3.6-27B}"   # 与目标检测那个项目同一套服务
+# review 最好换一个模型: 同一个模型审自己写的答案基本全过, 六维形同虚设
+REVIEW_MODEL="${REVIEW_MODEL:-$VLM_MODEL}"
+TARGET_PER_CLASS="${TARGET_PER_CLASS:-25000}"   # 每个异常类的 QA 总目标
+DESC_SHARE="${DESC_SHARE:-60}"             # 其中描述+推理(LLM 侧)占几成, 单位 %
+LLM_TARGET=$(( TARGET_PER_CLASS * DESC_SHARE / 100 ))
+RULE_TARGET=$(( TARGET_PER_CLASS - LLM_TARGET ))
+WORKERS="${WORKERS:-8}"
+FACETS_PER_IMAGE="${FACETS_PER_IMAGE:-4}"
+INLINE_IMAGES="${INLINE_IMAGES:-0}"        # 远端 API 要 base64 内联; 本地 vLLM 挂同一块盘就不用
+RELAX_BELOW="${RELAX_BELOW:-3000}"         # 产量低于这么多张图的类启用放宽档补量, 0 关闭
+# 媒体归集: 填了就把引用到的图片/视频硬链到语料库目录, 并把 json 里的路径改过去
+#   MEDIA_ROOT=/mnt/si003010kcx0/mmdata/data_process/corpus_media
+MEDIA_ROOT="${MEDIA_ROOT:-}"
+MEDIA_NAME="${MEDIA_NAME:-military_anomaly}"
+MEDIA_MODE="${MEDIA_MODE:-hardlink}"       # hardlink | symlink | copy
 
 mkdir -p "$OUT"/{interim,screened,golden,vqa_rule,vqa_llm,frames,tiles}
 SKIPPED=()
@@ -23,6 +43,7 @@ resolve() {
 step() { echo; echo "──── $* ────"; }
 run()  { if "$@"; then return 0; else echo "  [失败] $*"; return 1; fi; }
 
+echo "配额: 每类 $TARGET_PER_CLASS 条 = 描述/推理 $LLM_TARGET (${DESC_SHARE}%) + 规则 $RULE_TARGET"
 echo "════ 0. 数据体检 ════"
 $PY tools/doctor.py --root "$DATA" || true
 
@@ -52,7 +73,9 @@ FILES=("$OUT"/interim/*.jsonl)
 cat "${FILES[@]}" > "$OUT/all_scenes.jsonl"          # 显式列文件, 不用 *.jsonl 以免把输出 cat 进去
 echo "合并 ${#FILES[@]} 个来源 -> $OUT/all_scenes.jsonl ($(wc -l < "$OUT/all_scenes.jsonl") 个 scene)"
 
-step "2. 事件派生";  run $PY tools/derive_events.py --scenes "$OUT/all_scenes.jsonl" --out "$OUT/all_ev.jsonl"
+step "2. 事件派生"
+run $PY tools/derive_events.py --scenes "$OUT/all_scenes.jsonl" --out "$OUT/all_ev.jsonl" \
+    --relax-below "$RELAX_BELOW"
 step "3. 质量筛选";  run $PY tools/screen.py --scenes "$OUT/all_ev.jsonl" --out-dir "$OUT/screened"
 KEPT="$OUT/screened/scenes_kept.jsonl"; [ -s "$KEPT" ] || KEPT="$OUT/all_ev.jsonl"
 step "4. golden set"
@@ -61,15 +84,50 @@ PER_CELL=12; [ "$N_SCENE" -lt 2000 ] && PER_CELL=$(( N_SCENE / 100 + 1 ))
 echo "  scene 总数 $N_SCENE, 每格取 $PER_CELL 张"
 run $PY tools/make_golden.py --scenes "$KEPT" --out-dir "$OUT/golden" --per-cell "$PER_CELL"
 EXC="$OUT/golden/exclude_ids.txt"
-step "5. 规则生成";  run $PY tools/build_vqa.py --scenes "$KEPT" --out-dir "$OUT/vqa_rule" ${EXC:+--exclude-ids "$EXC"}
-step "6. LLM 生成(导出请求)"
-run $PY tools/llm_qa.py generate --scenes "$KEPT" --facets-per-image 4 \
-    ${EXC:+--exclude-ids "$EXC"} --dry-run --out "$OUT/interim/llm_requests.jsonl"
-echo "  请求已导出。配好 VLM 服务后去掉 --dry-run 重跑, 再执行:"
-echo "    $PY tools/llm_qa.py verify --generated <生成结果> --model <换一个模型> --out $OUT/vqa_llm/all.json"
+step "5. 规则生成"
+run $PY tools/build_vqa.py --scenes "$KEPT" --out-dir "$OUT/vqa_rule" \
+    --target-per-class "$RULE_TARGET" ${EXC:+--exclude-ids "$EXC"}
 
-step "7. 数据体检"
-CHK=("$OUT"/vqa_rule/*.json)
+GEN="$OUT/interim/llm_generated.jsonl"
+INLINE=(); [ "$INLINE_IMAGES" = "1" ] && INLINE=(--inline-images)
+if [ -n "$VLM_BASE_URL" ]; then
+  step "6a. LLM 生成描述/推理 (模型 $VLM_MODEL @ $VLM_BASE_URL)"
+  run $PY tools/llm_qa.py generate --scenes "$KEPT" \
+      --facets-per-image "$FACETS_PER_IMAGE" --target-per-class "$LLM_TARGET" \
+      --base-url "$VLM_BASE_URL" --model "$VLM_MODEL" --workers "$WORKERS" \
+      ${INLINE[@]+"${INLINE[@]}"} ${EXC:+--exclude-ids "$EXC"} --out "$GEN"
+  if [ -s "$GEN" ]; then
+    step "6b. must-not 硬过滤 + 六维 review (审稿模型 $REVIEW_MODEL)"
+    [ "$REVIEW_MODEL" = "$VLM_MODEL" ] && \
+      echo "  [注意] 审稿和生成是同一个模型, 自己审自己会虚高, 建议 REVIEW_MODEL 换一个"
+    run $PY tools/llm_qa.py verify --generated "$GEN" \
+        --base-url "$VLM_BASE_URL" --model "$REVIEW_MODEL" --workers "$WORKERS" \
+        ${INLINE[@]+"${INLINE[@]}"} --out "$OUT/vqa_llm/all.json"
+  else
+    echo "  生成结果为空, 跳过 review"
+  fi
+else
+  step "6. LLM 生成(只导出请求, 未配 VLM_BASE_URL)"
+  run $PY tools/llm_qa.py generate --scenes "$KEPT" \
+      --facets-per-image "$FACETS_PER_IMAGE" --target-per-class "$LLM_TARGET" \
+      ${EXC:+--exclude-ids "$EXC"} --dry-run --out "$OUT/interim/llm_requests.jsonl"
+  echo "  请求已导出。配好服务后这样跑完整流程:"
+  echo "    VLM_BASE_URL=http://192.168.78.36:3012/v1 VLM_MODEL=$VLM_MODEL \\"
+  echo "    REVIEW_MODEL=<换一个模型> bash run_all.sh $DATA $OUT"
+fi
+
+step "7. 合并为 LLaMA-Factory 数据集"
+run $PY tools/merge_dataset.py --in "$OUT/vqa_rule" "$OUT/vqa_llm" --out "$OUT/vqa"
+
+if [ -n "$MEDIA_ROOT" ]; then
+  step "7b. 媒体归集 -> $MEDIA_ROOT/$MEDIA_NAME/{images,videos}/"
+  run $PY tools/export_media.py --vqa-dir "$OUT/vqa" \
+      --media-root "$MEDIA_ROOT" --name "$MEDIA_NAME" --mode "$MEDIA_MODE"
+fi
+
+step "8. 数据体检"
+shopt -s nullglob
+CHK=("$OUT"/vqa/train*.json "$OUT"/vqa/val*.json "$OUT"/vqa/test*.json)
 if [ ${#CHK[@]} -gt 0 ]; then run $PY tools/check_dataset.py "${CHK[@]}"; else echo "  无输出可检"; fi
 
 echo; echo "════ 完成 ════"

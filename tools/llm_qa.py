@@ -32,6 +32,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ds.boxes import BBOX_SCALE, COORD_MODE
+from build_vqa import scene_quality  # noqa: E402  与规则侧共用一套质量分口径
 from facets import Facet, load_all, load_tool
 from scene import Scene, load_scenes
 
@@ -152,21 +153,47 @@ def build_facts(scene: Scene, onto: dict[str, Any], max_objects: int = 30) -> di
 
 
 # ---------------------------------------------------------------- LLM 客户端
+DEFAULT_MODEL = "Qwen3.6-27B"        # 与 target_detection_vl_dataset 项目同一套服务
+
+
+def _norm_base(u: str) -> str:
+    """容忍两种写法: 填到 /v1 为止, 或把整个 /v1/chat/completions 都填进来。
+    对齐目标检测那个项目的 config —— 那边 api_url 写的是完整路径。"""
+    u = u.strip().rstrip("/")
+    for suf in ("/chat/completions", "/completions"):
+        if u.endswith(suf):
+            u = u[: -len(suf)]
+    return u
+
+
 class LLM:
-    """OpenAI 兼容接口。base_url 指向本地 vLLM 即可, 无需外网。"""
+    """OpenAI 兼容接口。base_url 指向本地 vLLM 即可, 无需外网。
+
+    base_url 可以用逗号分隔写多个地址: 请求按轮转分发, 某一路连不上就摘掉它,
+    其余照跑。算力是多台机器的时候, 这比串行排队快得多。
+    """
 
     def __init__(self, model: str, base_url: str | None = None,
-                 api_key_env: str = "OPENAI_API_KEY", cache_dir: str | None = None,
+                 api_key_env: str = "VLM_API_KEY", cache_dir: str | None = None,
                  temperature: float = 0.7, max_retries: int = 3):
         self.model = model
-        self.base_url = (base_url or os.environ.get("OPENAI_BASE_URL")
-                         or "https://api.openai.com/v1").rstrip("/")
-        self.api_key = os.environ.get(api_key_env, "")
+        raw = (base_url or os.environ.get("VLM_BASE_URL")
+               or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1")
+        self.endpoints = [_norm_base(u) for u in raw.split(",") if u.strip()]
+        self.dead: set[str] = set()
+        self._rr = 0
+        self.api_key = os.environ.get(api_key_env) or os.environ.get("OPENAI_API_KEY", "")
         self.temperature = temperature
         self.max_retries = max_retries
         self.cache = Path(cache_dir) if cache_dir else None
         if self.cache:
             self.cache.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def base_url(self) -> str:
+        alive = [u for u in self.endpoints if u not in self.dead] or self.endpoints
+        self._rr = (self._rr + 1) % len(alive)
+        return alive[self._rr]
 
     def _key(self, payload: dict) -> str:
         return hashlib.sha256(json.dumps(payload, sort_keys=True,
@@ -186,9 +213,10 @@ class LLM:
 
         last = None
         for attempt in range(self.max_retries):
+            url = self.base_url
             try:
                 req = urllib.request.Request(
-                    f"{self.base_url}/chat/completions",
+                    f"{url}/chat/completions",
                     data=json.dumps(payload).encode("utf-8"),
                     headers={"Content-Type": "application/json",
                              "Authorization": f"Bearer {self.api_key}"})
@@ -200,8 +228,10 @@ class LLM:
                 return content
             except Exception as e:                       # noqa: BLE001
                 last = e
+                if isinstance(e, OSError) and len(self.endpoints) > 1:
+                    self.dead.add(url)       # 连不上的那一路摘掉, 别再往里发
                 time.sleep(2 ** attempt)
-        raise RuntimeError(f"LLM 调用失败: {last}")
+        raise RuntimeError(f"LLM 调用失败({url}): {last}")
 
 
 def image_message(text: str, image_path: str | None, inline: bool) -> list[dict]:
@@ -327,6 +357,89 @@ def _pick_facets(s: Scene, facets: dict[str, list[Facet]], anomaly: str,
     return picked
 
 
+MAX_FACETS_PER_IMAGE = 6   # 侧面池最多 6 个(3 通用 + 4 专属, 再减去至少留一个不抽)
+
+
+def _pool_size(s: Scene, facets: dict[str, list[Facet]], anomaly: str) -> int:
+    return len([f for f in facets.get(anomaly, [])
+                if f.kind not in SKIP_FACETS and facet_applicable(f.kind, s)])
+
+
+def _yield_of(sizes: list[int], k: int) -> int:
+    """k 个侧面时这批 scene 能出多少条描述题。
+
+    每张图实际能抽的数量受侧面池限制(见 _pick_facets 里那条"至少留一个不抽"),
+    所以不能简单地 len(scenes) * k —— 正常图池子只有 3 个, 开到 5 也白开。
+    """
+    return sum(min(k, max(1, n - 1)) for n in sizes if n)
+
+
+def plan_quota(scenes: list[Scene], facets: dict[str, list[Facet]], target: int,
+               base_k: int, reason_ratio: float, seed: int) -> dict[str, tuple[list[Scene], int]]:
+    """把"每类 N 条"换算成每类的 (参与的 scene, 每图抽几个侧面)。
+
+    两个方向都要调:
+      - 稀缺类(border_crossing 这种源数据本来就少的)把 facets-per-image 往上顶,
+        顶到侧面池抽干为止, 还不够就如实报缺口, 不靠复制样本凑数;
+      - 富余类(explosion/smoke)按 **图** 下采样, 不是逐条丢, 同图的几条要一起走。
+    """
+    by_cls: dict[str, list[Scene]] = {}
+    for s in scenes:
+        by_cls.setdefault((s.anomaly_types or ["normal"])[0], []).append(s)
+
+    rng = random.Random(seed)
+    plan: dict[str, tuple[list[Scene], int]] = {}
+    report: list[tuple[str, int, int, int, int]] = []   # 类, scene 数, k, 预估条数, 目标
+    for cls, group in by_cls.items():
+        # 正常样本按 3:7 配到异常总量上, 不单独设目标
+        tgt = target if cls != "normal" else int(target * max(1, len(by_cls) - 1) * 3 / 7)
+        sizes = [_pool_size(s, facets, cls) for s in group]
+        extra = reason_ratio * sum(1 for s in group if s.events or s.meta.get("hard_negative"))
+
+        k = base_k
+        while k < MAX_FACETS_PER_IMAGE and _yield_of(sizes, k) + extra < tgt:
+            k += 1
+        est = _yield_of(sizes, k) + extra
+
+        keep = group
+        if est > tgt * 1.05 and k == base_k:
+            # 先把 k 压到 1 再看, 能靠少抽侧面满足就不丢图 —— 图的多样性比每图条数值钱
+            while k > 1 and _yield_of(sizes, k - 1) + extra >= tgt:
+                k -= 1
+                est = _yield_of(sizes, k) + extra
+            if est > tgt * 1.05:
+                # 富余的不随机丢, 按质量分在各数据源之间轮着取 —— 同 build_vqa 的口径
+                q = scene_quality(group)
+                by_src: dict[str, list[Scene]] = {}
+                for sc in group:
+                    by_src.setdefault(sc.source_dataset, []).append(sc)
+                for src in by_src:
+                    by_src[src].sort(key=lambda sc: (-q.get(sc.image_id, 0.5), sc.image_id))
+                srcs = sorted(by_src)
+                rng.shuffle(srcs)
+                cur = {src: 0 for src in srcs}
+                acc, picked = 0.0, []
+                per = est / max(1, len(group))
+                while acc < tgt and any(cur[src] < len(by_src[src]) for src in srcs):
+                    for src in srcs:
+                        if cur[src] >= len(by_src[src]) or acc >= tgt:
+                            continue
+                        picked.append(by_src[src][cur[src]])
+                        cur[src] += 1
+                        acc += per
+                keep = picked
+                est = _yield_of([_pool_size(s, facets, cls) for s in keep], k) + \
+                      reason_ratio * sum(1 for s in keep if s.events or s.meta.get("hard_negative"))
+        plan[cls] = (keep, k)
+        report.append((cls, len(keep), k, int(est), tgt))
+
+    print("\n按类别配额(LLM 描述侧):")
+    for cls, n, k, est, tgt in sorted(report, key=lambda r: -r[3]):
+        flag = "✅" if est >= tgt * 0.8 else f"❌ 缺口 {tgt - est}"
+        print(f"  {cls:18s} scene {n:6d} × {k} 侧面 ≈ {est:7d} 条 / 目标 {tgt:6d}  {flag}")
+    return plan
+
+
 def cmd_generate(args, onto):
     tmpl = load_prompt("describe_gen.txt", args.prompt_dir + "/_tools")
     reason_tmpl = load_prompt("reason_gen.txt", args.prompt_dir + "/_tools")
@@ -335,12 +448,20 @@ def cmd_generate(args, onto):
     scenes = load_scenes_excluding(args.scenes, args.exclude_ids)
     rng = random.Random(args.seed)
 
+    plan = (plan_quota(scenes, facets, args.target_per_class, args.facets_per_image,
+                       args.reason_ratio, args.seed)
+            if args.target_per_class else None)
+    if plan:
+        keep = {id(s) for ss, _ in plan.values() for s in ss}
+        scenes = [s for s in scenes if id(s) in keep]
+
     reqs: list[dict] = []
     n_skip = 0
     for s in scenes:
         anomaly = (s.anomaly_types or ["normal"])[0]
         facts = build_facts(s, onto, args.max_objects)
-        picked = _pick_facets(s, facets, anomaly, rng, args.facets_per_image)
+        k = plan[anomaly][1] if plan and anomaly in plan else args.facets_per_image
+        picked = _pick_facets(s, facets, anomaly, rng, k)
         if not picked:
             n_skip += 1
         for fa in picked:
@@ -523,15 +644,32 @@ def _write_requests(reqs: list[dict], out: str) -> None:
 
 
 def _run_and_write(reqs, fn, out: str, workers: int) -> None:
+    """并发跑完写盘。**单条失败不中断整批** —— 十万条的活跑几个小时,
+    不能因为中间一次 500 把前面的成果全丢了。失败的记 error 字段,
+    verify 那一步会当空答案滤掉; 重跑时命中缓存, 成功的不重复计费。
+    """
     Path(out).parent.mkdir(parents=True, exist_ok=True)
-    done = 0
+
+    def guarded(r):
+        try:
+            return fn(r)
+        except Exception as e:                           # noqa: BLE001
+            return {**{k: v for k, v in r.items() if k != "prompt"},
+                    "answer": "", "error": f"{type(e).__name__}: {e}"}
+
+    done = n_err = 0
     with Path(out).open("w", encoding="utf-8") as f, ThreadPoolExecutor(workers) as ex:
-        for res in ex.map(fn, reqs):
+        for res in ex.map(guarded, reqs):
             f.write(json.dumps(res, ensure_ascii=False) + "\n")
+            f.flush()
             done += 1
+            n_err += bool(res.get("error"))
             if done % 50 == 0:
-                print(f"  {done}/{len(reqs)}", flush=True)
-    print(f"完成 {done} 条 -> {out}")
+                print(f"  {done}/{len(reqs)}" + (f"  (失败 {n_err})" if n_err else ""),
+                      flush=True)
+    print(f"完成 {done} 条 -> {out}" + (f"  其中 {n_err} 条调用失败" if n_err else ""))
+    if n_err and n_err > len(reqs) * 0.1:
+        print(f"  [警告] 失败率 {n_err / len(reqs):.0%}, 先查服务再往下走")
 
 
 def main() -> None:
@@ -542,8 +680,10 @@ def main() -> None:
         p.add_argument("--out", required=True)
         p.add_argument("--ontology", default="configs/ontology.yaml")
         p.add_argument("--prompt-dir", default="configs/prompts")
-        p.add_argument("--model", default="qwen2.5-vl-72b-instruct")
-        p.add_argument("--base-url", default=None, help="OpenAI 兼容端点, 可指向本地 vLLM")
+        p.add_argument("--model", default=DEFAULT_MODEL)
+        p.add_argument("--base-url", default=None,
+                       help="OpenAI 兼容端点, 可指向本地 vLLM。逗号分隔可写多路轮转。"
+                            "不填则读环境变量 VLM_BASE_URL")
         p.add_argument("--cache-dir", default=".llm_cache", help="按请求哈希缓存, 重跑不重复计费")
         p.add_argument("--workers", type=int, default=8)
         p.add_argument("--inline-images", action="store_true", help="图像转 base64 内联(远端 API 需要)")
@@ -564,6 +704,9 @@ def main() -> None:
     p.add_argument("--temperature", type=float, default=0.55,
                    help="描述求准不求奇, 0.5~0.6 即可; 多样性靠侧面与问法池, 不靠高温")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--target-per-class", type=int, default=0,
+                   help="每个异常类的目标条数(描述侧)。富余的按图下采样, "
+                        "稀缺的自动提高每图侧面数, 仍不足则报缺口。0 表示不限")
     common(p)
 
     p = sub.add_parser("verify", help="must-not 硬过滤 + 六维 review + 落盘")

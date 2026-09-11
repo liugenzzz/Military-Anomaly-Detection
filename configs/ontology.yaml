@@ -7,13 +7,23 @@
 #     而是标为 hard_negative 困难负样本(避免把停车场训成装甲集群)
 #   - 人员聚集不设军事身份要求: 航拍视角分辨不出军装, 该约束不可实现
 #   - 停用的类别保留在文件末尾(enabled: false), 便于日后一行恢复
+#   - v0.4.0: 每条规则加 relax 档。产量够的类别照严格阈值走(多的筛精),
+#     产量不够的类别才启用放宽档补量(少的放宽), 且补出来的事件带 relaxed
+#     标记, 下游答案措辞随之变软 —— 放宽的是召回, 不是结论的确定性。
 #   - v0.2.1: 军用/民用目标分开命名(military-plane vs civil-plane),
 #     民用机场机群与民用港口因此成为困难负样本而非误标为集结
 
-version: "0.2.2"
+version: "0.4.0"
 box_scale: 1000                 # grounding 坐标归一化上限, Qwen-VL 系列用 1000
 negative_ratio_target: 0.30     # normal 样本占比下限
 qa_per_anomaly_target: 25000    # 每个异常类的 QA 条数目标
+
+# 各数据源的抽帧间隔。默认 30 对 DroneCrowd 与 VisDrone-MOT 太稀
+# (24960 帧只取 832), 按配额反推后下调; 近重复由 screen.py 的闸3 兜底。
+stride:
+  DroneCrowd: 8
+  VisDrone2019-MOT: 8
+  Drone-Anomaly: 10
 
 classes:
   - id: normal
@@ -36,6 +46,13 @@ classes:
           min_cluster_size: 20
           eps_ratio: 0.04
           eps_obj_mult: 3.0        # 邻域半径下限 = 3 倍目标尺寸, 使判定不随裁剪尺寸漂移
+          # 补量用的放宽档。只在该类产量不够时由 derive_events --relax-below 启用,
+          # 命中的事件打 relaxed 标记, 答案改用"小规模聚集"这类留有余地的说法,
+          # 不会拿放宽出来的样本去冒充典型集结。
+          relax:
+            min_cluster_size: 12
+            eps_ratio: 0.055
+            eps_obj_mult: 3.5
       # 装备: 必须含军事目标。纯民用车辆聚集(停车场/卡车场)是最大错标源,
       # 命中规模但不含军事目标者标为 hard_negative, 作为困难负样本
       - name: equipment
@@ -46,9 +63,16 @@ classes:
                            "military-vehicle", "military-truck", "armored",
                            "civil-plane", "military-plane", "civil-helicopter",
                            "military-helicopter", "ship", "warship"]
-          min_cluster_size: 8
+          # 阈值按军事装备的规模定, 不按民用停车场。MAR20 平均 5.8 架/图,
+          # 取 8 会滤掉约六成图; 5 件军事装备集中停放已构成集结。
+          # 民用目标由 require_any 排除, 不靠数量阈值把关。
+          min_cluster_size: 5
           eps_ratio: 0.06
           eps_obj_mult: 3.0        # 同上; DOTA 切片后图像变小, 只按对角线取会漏判
+          relax:
+            min_cluster_size: 3    # 3 件军事装备集中停放, 只能说"小规模集结迹象"
+            eps_ratio: 0.08
+            eps_obj_mult: 4.0
           # 军用与民用必须分开命名。MAR20 的飞机全是军机, DOTA 的 plane 含民航客机;
           # 若都叫 plane, 民用机场停机坪会被判成装备集结。同理 DOTA 的 ship
           # 多为民用港口, 只有 warship 才计入。
@@ -76,6 +100,12 @@ classes:
       kind: boundary_cross
       target_classes: ["person", "vehicle", "soldier", "truck"]
       min_displacement_ratio: 0.02   # 相对图像对角线的最小位移, 过滤抖动
+      # 越界只有 VisDrone-MOT 一个来源, 是四类里最紧的一类, 放宽档必然用得上:
+      # 位移门槛减半 + 允许更多类目标越界。
+      relax:
+        min_displacement_ratio: 0.01
+        target_classes: ["person", "vehicle", "soldier", "truck", "car", "van",
+                         "bus", "motor", "pedestrian", "people"]
 
   # ---------------------------------------------------------------- 已停用
   # 恢复方式: enabled 改 true。但请先确认数据量能支撑 25,000 条 QA(约 2,800 张图)。

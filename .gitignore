@@ -12,3 +12,10 @@ data/vqa/*.json
 saves/
 *.log
 .DS_Store
+.llm_cache/
+data/screened/
+data/golden/
+data/vqa_rule/
+data/vqa_llm/
+data/tiles/
+data/frames/

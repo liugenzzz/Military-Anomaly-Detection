@@ -18,9 +18,11 @@
         ↓  screen.py + llm_qa.py review     五道闸质量筛选，预期保留 65-75%
   干净的 Scene
         ↓
-  ┌── build_vqa.py   规则侧  判定 / 方位指代 / 坐标框 / 计数 —— 答案由标注唯一决定
+  ┌── build_vqa.py   规则侧  判定/方位/坐标框/计数/构成/对比/纠错/时序 —— 答案由标注唯一决定
   └── llm_qa.py      LLM 侧  描述(21 个侧面) / 推理
         ↓  generate → must-not 硬过滤(零成本, 先滤跑题的) → 六维 review
+        ↓  merge_dataset.py   合并两侧 + 生成 dataset_info.json
+        ↓  export_media.py    图片/视频归集到语料库目录并改写路径
   LLaMA-Factory ShareGPT 指令数据
 ```
 
@@ -47,11 +49,89 @@
 ## 一条命令跑完
 
 ```bash
-bash run_all.sh /path/to/数据根目录            # 预处理 → 派生 → 筛选 → golden → 规则生成 → 导出 LLM 请求
+# 不配端点: 处理 + 规则生成走完, LLM 那步只导出请求(可喂 vLLM 离线批推理)
+bash run_all.sh /path/to/数据根目录
+
+# 配了端点: 一路跑到 LLM 描述/推理生成 + must-not 硬过滤 + 六维 review
+VLM_BASE_URL=http://127.0.0.1:8000/v1 \
+VLM_MODEL=qwen2.5-vl-72b-instruct \
+REVIEW_MODEL=internvl2_5-78b \
+bash run_all.sh /path/to/数据根目录
+
 python tools/doctor.py --root /path/to/数据根目录   # 只体检: 看手上的数据能产出哪些异常类
 ```
 
 没下到的数据集会自动跳过并在末尾列出，不会中断流程。
+
+| 环境变量 | 默认 | 作用 |
+|---|---|---|
+| `VLM_BASE_URL` | 空 | OpenAI 兼容端点。**留空就只导出请求，不调用任何 API** |
+| `VLM_MODEL` | `qwen2.5-vl-72b-instruct` | 写描述/推理的模型 |
+| `REVIEW_MODEL` | 同 `VLM_MODEL` | 审稿模型。**务必换一个**——同一个模型审自己写的答案基本全过 |
+| `TARGET_PER_CLASS` | `25000` | 每个异常类的目标条数。富余的按图下采样，稀缺的自动提高每图侧面数，仍不足则如实报缺口 |
+| `FACETS_PER_IMAGE` | `4` | 每张图抽几个描述侧面（会被配额上调/下调） |
+| `INLINE_IMAGES` | `0` | 置 1 把图转 base64 内联。远端 API 需要；本地 vLLM 挂同一块盘就不用 |
+| `WORKERS` | `8` | 并发数 |
+
+配额两个方向都调：`explosion`/`smoke` 源数据富余，按 **image_id 分组**下采样（同图的几条
+QA 要么一起留要么一起丢，否则后面按组切 train/test 会串），`border_crossing` 这类源数据本来
+就少的，把每图侧面数顶到侧面池抽干为止——**不靠复制样本凑数，凑不够就在报告里点名**。
+
+LLM 调用单条失败不中断整批：失败的记 `error` 字段、答案留空，`verify` 那步当空答案滤掉；
+重跑时命中 `.llm_cache`，已经成功的不重复计费。
+
+## 配额: 多的筛精，少的放宽
+
+数据量在四类异常之间差了一个数量级，直接按同一套阈值跑，产出必然一头沉。两个方向分开处理：
+
+**多的筛精**（explosion / smoke）。超出配额的部分不是随机丢，而是按质量分排序后
+**在各数据源之间轮着取**：
+
+- 质量分 = 清晰度分位 × 0.35 + 目标数分位 × 0.25 + 事件置信度 × 0.30 + 困难负样本加分 0.10，
+  放宽档样本 −0.20、闸5 判「不确定」的 −0.10；
+- 清晰度与目标数都先在**本数据源内部**换算成分位再比——卫星图天然锐利、夜间监控天然发糊，
+  blur 的绝对值跨数据源没有可比性；
+- 轮取是为了防止某个又大又清晰的数据源把一类的名额全占了。全来自一个源的 25000 条，
+  训出来的是那个源的模型。
+
+**少的放宽**（massing/equipment、border_crossing）。`configs/ontology.yaml` 里每条规则带一个
+`relax` 档，由 `derive_events.py --relax-below N` 触发，只对产量不够的类生效：
+
+| 类别 | 严格档 | 放宽档 |
+|---|---|---|
+| 人员聚集 | ≥20 人成簇 | ≥12 人 |
+| 装备集结 | ≥5 件军事装备 | ≥3 件 |
+| 越界移动 | 位移 ≥2% 对角线 | ≥1%，且放宽目标类别 |
+
+放宽的是**召回，不是结论的确定性**。三条约束保证这一点：补出来的事件带 `relaxed` 标记；
+对应答案的措辞随之变软（「判定为集结」→「存在苗头，可能属于集结…规模有限，建议继续观察确认」）；
+放宽样本最多占该类的一半，否则这一类的分布会被边缘样本主导，模型学到的就是「稍微聚一下就算集结」。
+
+装备集结的 `require_any`（必须含军事目标）**不在放宽之列**——放宽它等于把民用停车场
+标成装甲集群，那不是补量，是造错标。
+
+## 题型
+
+规则侧 11 种（答案全部由标注唯一决定，零幻觉、零成本）：
+
+| 题型 | 问什么 | 谁出得了 |
+|---|---|---|
+| `judge` | 有没有异常、是哪类 | 所有图，每张必出 |
+| `locate_verbal` | 异常在画面什么方位（**不给坐标**） | 有区域信息的图，占定位题七成 |
+| `locate_box` | 框出异常区域 | 同上，占三成 |
+| `count` | 某类目标有几个 | 有检测框的图 |
+| `count_box` | 计数**并逐个框出** | 目标数 ≤12 的图 |
+| `compose` | 画面里有哪几类目标、各多少 | 含 ≥2 类目标的图 |
+| `compare` | 左右/上下哪边更密集 | 目标数 ≥4 的图 |
+| `correct` | 给一句**错误陈述**让模型推翻 | 所有图。**三成给的是真陈述** |
+| `temporal` | 异常出现在序列的哪个阶段 | 带轨迹的视频/多帧 |
+| `negation` | 问画面里**没有**的东西 | 所有图 |
+| `judge+locate(+why)` | 两轮 / 三轮追问 | 多轮占三成，其中三成半追到第三轮 |
+
+`correct` 那三成真陈述不能省：全给假的，模型会学成「凡是被问就否定」，换个正确说法它照样推翻，
+这比一味附和还糟。`temporal` 只答轨迹能证明的事——静态图问「什么时候开始的」，只能靠编。
+
+描述与推理走 LLM 侧，见 [docs/12_description_design.md](docs/12_description_design.md)。
 
 ## 三种输入形态
 
@@ -63,6 +143,40 @@ python tools/doctor.py --root /path/to/数据根目录   # 只体检: 看手上�
 
 图像样本与视频样本**分文件落盘**（`train.json` / `train_video.json`），因为在 LLaMA-Factory
 里它们是两个数据集条目，`columns` 分别映射 `images` 与 `videos`，混在一个文件里会加载失败。
+`merge_dataset.py` 会按这个分法生成 `dataset_info.json`，四个条目：
+`military_anomaly` / `military_anomaly_val` / `military_anomaly_video` / `military_anomaly_video_val`。
+
+图片就是图片、视频就是视频，中间不互转：ERA 的 5 秒片段整段进 `videos`，
+静态数据集整张进 `images`，越界的多帧序列进 `images`（一条样本挂多个路径）。
+
+## 输出目录与媒体归集
+
+标注产物（json）和媒体文件（jpg/mp4）分开放：
+
+```bash
+# 标注产物落在哪: 第二个参数, 或环境变量 OUT_DIR
+bash run_all.sh /path/to/数据根 /path/to/输出目录
+
+# 媒体归集到语料库: 填 MEDIA_ROOT 就自动建目录、硬链文件、改写 json 里的路径
+MEDIA_ROOT=/mnt/si003010kcx0/mmdata/data_process/corpus_media \
+MEDIA_NAME=military_anomaly \
+bash run_all.sh /path/to/数据根
+```
+
+归集后的结构，和 `corpus_media` 下已有的 `book/ journal/ video/` 一个分法：
+
+```
+corpus_media/military_anomaly/
+  images/<数据源>/xxx.jpg      MAR20/ FASDD_UAV/ DOTA/ VisDrone/ DroneCrowd/ ...
+  videos/<数据源>/xxx.mp4      ERA/ Drone-Anomaly/ ...
+```
+
+图片和视频分成两个二级目录，其下**再按数据源分目录**——不同数据集重名文件太多
+（DroneCrowd 和 VisDrone 都有 `img0001.jpg`），不按源分会互相覆盖。
+
+默认建**硬链接**：同一块盘上不占额外空间，删原文件也不影响；跨盘时自动退回复制
+（`MEDIA_MODE=symlink|copy` 可改）。归集完 json 里的路径直接指向语料库位置，
+训练时不用再拼相对路径。
 
 ## 快速开始
 
@@ -105,7 +219,9 @@ python tools/check_dataset.py data/vqa/*.json --check-images
 
 ## 训练
 
-`data/dataset_info.json` 已注册好数据集，复制到 LLaMA-Factory 的 `data/` 目录（或用 `--dataset_dir` 指向本仓库 `data/`）：
+`merge_dataset.py` 会在输出目录下生成 `vqa/dataset_info.json`（内容随实际产出的文件变化），
+把 LLaMA-Factory 的 `--dataset_dir` 指到那个目录即可；仓库里的 `data/dataset_info.json`
+是一份可直接照抄的样例。
 
 ```bash
 llamafactory-cli train configs/qwen2_5vl_lora_sft.yaml
@@ -114,12 +230,12 @@ llamafactory-cli train configs/qwen2_5vl_lora_sft.yaml
 ## 目录结构
 
 ```
-configs/ontology.yaml              异常本体(10 类) + 自动判定规则参数
+configs/ontology.yaml              异常本体(4 类 + 正常) + 判定规则的严格档与放宽档
 configs/qwen2_5vl_lora_sft.yaml    LLaMA-Factory 训练配置示例
 configs/prompts/                   33 份纯文本 prompt，与代码分离，服务器上可直接改
   system.txt                       训练数据里的 system prompt
   describe/<异常类>/<侧面>.txt      21 个描述侧面，各带 must-not 硬隔离与问法池
-  ask/*.txt                        判定/方位/坐标/计数/推理/否定的问法池
+  ask/*.txt                        11 种题型各自的问法池
   _tools/*.txt                     描述生成、推理生成、六维 review、图像质检
 tools/scene.py                     统一中间表示
 tools/prepare.py                   数据集预处理统一入口(9 个数据集各一个子命令)
@@ -128,9 +244,11 @@ tools/adapters.py                  通用适配器(COCO/YOLO/分类目录) + dem
 tools/derive_events.py             规则派生异常事件标签
 tools/screen.py                    质量筛选闸1-4 + 合并闸5 VLM 复核结果
 tools/facets.py                    侧面与问法池的加载 + 自检(--check)
-tools/build_vqa.py                 规则生成: 判定/方位指代/坐标框/计数 + 否定变体
+tools/build_vqa.py                 规则生成: 11 种题型 + 按质量分的配额筛选
 tools/llm_qa.py                    按侧面生成描述与推理 → must-not 硬过滤 → 六维 review
 tools/make_golden.py               自动构建 golden set(零人工) + 训练集排除清单
+tools/merge_dataset.py             合并规则侧/LLM 侧 + 生成 dataset_info.json
+tools/export_media.py              图片/视频归集到语料库目录并改写 json 路径
 tools/check_dataset.py             数据体检(路径/坐标/分布/风格/轮数/正负比)
 data/dataset_info.json             LLaMA-Factory 数据集注册
 docs/                              数据源调研 + schema 设计
