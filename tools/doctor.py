@@ -147,16 +147,27 @@ def main() -> None:
 
         n_img, n_vid = _count(d, IMG), _count(d, VID)
         n_ann = _count(d, (".txt", ".xml", ".json", ".mat"))
-        only_archives = {x.name for x in d.iterdir() if x.is_dir()} <= {"archives"}
+        subdirs = {x.name for x in d.iterdir() if x.is_dir()}
+        arch = d / "archives"
+        # 注意: 空集是任何集合的子集, 所以不能只判断 subdirs <= {"archives"} ——
+        # 目录里一个子目录都没有时那个判断也为真, 会把空目录误报成"未解压"。
+        has_arch = arch.is_dir() and any(arch.iterdir())
         detail = f"{n_img} 图 / {n_vid} 视频 / {n_ann} 标注文件"
 
-        if only_archives:
-            print(f"{mark} {name:24s} ⚠ 只有 archives/，未解压   ({detail})")
-            blocked.append((name, feeds, critical, "未解压"))
-            continue
         if n_img == 0 and n_vid == 0:
-            print(f"{mark} {name:24s} ✗ 没有图像也没有视频   ({detail})")
-            blocked.append((name, feeds, critical, "无图像"))
+            if has_arch and subdirs <= {"archives"}:
+                sizes = sum(f.stat().st_size for f in arch.rglob("*") if f.is_file())
+                print(f"{mark} {name:24s} ⚠ 只有 archives/ 未解压   "
+                      f"({len(list(arch.iterdir()))} 个压缩包, {sizes // 2**20} MB)")
+                blocked.append((name, feeds, critical, "未解压"))
+            else:
+                files = sorted(x.name for x in d.iterdir() if x.is_file())[:5]
+                why = "目录为空" if not subdirs and not files else "无图像/视频"
+                print(f"{mark} {name:24s} ✗ {why}   ({detail})")
+                if subdirs or files:
+                    print(f"{'':27s}实际内容: 子目录 {sorted(subdirs)[:5] or '无'}，"
+                          f"文件 {files or '无'}")
+                blocked.append((name, feeds, critical, why))
             continue
 
         print(f"{mark} {name:24s} ✓ {detail}")
