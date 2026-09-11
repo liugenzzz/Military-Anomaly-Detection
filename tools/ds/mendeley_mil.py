@@ -27,8 +27,8 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-from ds.common import (detect_ann_format, image_size, iter_images, parse_voc_xml,
-                       parse_yolo_txt)
+from ds.common import (detect_ann_format, image_size, iter_images, looks_like_coco,
+                       parse_voc_xml, parse_yolo_txt)
 from scene import Obj, Scene
 
 DATASET = "Mendeley-UAV-Military"
@@ -93,8 +93,7 @@ def build(root: str, fmt: str | None = None, classes_file: str | None = None,
     print(f"[{DATASET}] 标注格式: {fmt}  保留类别: {sorted(keep)}")
 
     if fmt == "coco":
-        anns = [j for j in r.rglob("*.json")
-                if '"annotations"' in j.read_text(encoding="utf-8", errors="ignore")[:4000]]
+        anns = [j for j in r.rglob("*.json") if looks_like_coco(j)]
         if not anns:
             raise RuntimeError(f"{DATASET}: 探测为 coco 但找不到含 annotations 的 json")
         scenes: list[Scene] = []

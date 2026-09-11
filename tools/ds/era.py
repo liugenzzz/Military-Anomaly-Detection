@@ -1,6 +1,9 @@
 """ERA + CapERA —— 航拍事件视频（2864 段 × 5 秒, 25 类事件）+ 人工 caption。
 
-ERA:     <https://lcmou.github.io/ERA_Dataset/>   按类别分目录存放视频
+ERA:     <https://lcmou.github.io/ERA_Dataset/>
+         实际发布结构是三层: Videos/{Training,Test}/<类别>/<名称>.mp4
+         —— 类别在第三层不是第二层, 而且文件名里带空格("Concert_016 .mp4")。
+         另有官方 SingleFrames/ 单帧分类数据, 可作为图像模态一并采用。
 CapERA:  <https://github.com/yakoubbazi/CapEra>   每段视频 5 条人工 caption
 
 处理要点:
@@ -20,7 +23,7 @@ import json
 import re
 from pathlib import Path
 
-from ds.common import extract_frames, image_size, iter_videos
+from ds.common import VID_EXT, extract_frames, image_size, iter_images, iter_videos
 from scene import Event, Scene
 
 DATASET = "ERA"
@@ -51,8 +54,43 @@ EXCLUDE = {
 }
 
 
+# 这些目录名是划分层(train/test), 不是类别
+SPLIT_DIRS = {"train", "training", "trainval", "test", "testing", "val", "validation", "all"}
+
+
 def _norm_label(name: str) -> str:
     return re.sub(r"[\s\-]+", "_", name.strip().lower())
+
+
+def _class_dirs(root: Path) -> list[Path]:
+    """找出真正的类别目录。
+
+    ERA 的类别在 Videos/{Training,Test}/<类别>/ 第三层, 但别的镜像可能是两层,
+    所以这里不写死层数: 递归找含媒体文件的目录, 目录名不是 train/test 这类划分层
+    的就当类别。
+    """
+    hits: dict[str, Path] = {}
+    for d in sorted(root.rglob("*")):
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        if _norm_label(d.name) in SPLIT_DIRS:
+            continue
+        if any(x.suffix.lower() in VID_EXT for x in d.iterdir() if x.is_file()):
+            hits.setdefault(_norm_label(d.name), d)      # 同名类别只取一次
+    return list(hits.values())
+
+
+def _class_dirs_all(root: Path) -> list[Path]:
+    """同上, 但保留同名类别的所有目录(Training 与 Test 各一份)。"""
+    out = []
+    for d in sorted(root.rglob("*")):
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        if _norm_label(d.name) in SPLIT_DIRS:
+            continue
+        if any(x.suffix.lower() in VID_EXT for x in d.iterdir() if x.is_file()):
+            out.append(d)
+    return out
 
 
 def _load_capera(path: str | Path) -> dict[str, list[str]]:
@@ -92,13 +130,17 @@ def build(root: str, frames_dir: str | None = None, n_frames: int = 3,
     caps = _load_capera(capera_json) if capera_json else {}
     scenes: list[Scene] = []
     stat = {"anomaly": 0, "normal": 0, "excluded": 0, "unknown": 0}
+    warned: set[str] = set()
 
-    for cls_dir in sorted(p for p in r.iterdir() if p.is_dir()):
+    for cls_dir in _class_dirs_all(r):
         label = _norm_label(cls_dir.name)
         if label in EXCLUDE:
-            n = len(iter_videos(cls_dir))
+            n = sum(1 for x in cls_dir.iterdir()
+                    if x.is_file() and x.suffix.lower() in VID_EXT)
             stat["excluded"] += n
-            print(f"[{DATASET}] 排除歧义类别 {cls_dir.name} ({n} 段) —— 画面常含烟尘或火光")
+            if label not in warned:
+                warned.add(label)
+                print(f"[{DATASET}] 排除歧义类别 {cls_dir.name} —— 画面常含烟尘或火光")
             continue
         if label in ANOMALY:
             kind, subtype = ANOMALY[label]
@@ -107,13 +149,18 @@ def build(root: str, frames_dir: str | None = None, n_frames: int = 3,
             if not include_normal:
                 continue
         else:
-            stat["unknown"] += len(iter_videos(cls_dir))
-            print(f"[warn] {DATASET}: 未归档的类别 '{cls_dir.name}', 已跳过。"
-                  f"请在 era.py 的 ANOMALY/NORMAL/EXCLUDE 中补充")
+            stat["unknown"] += sum(1 for x in cls_dir.iterdir()
+                                   if x.is_file() and x.suffix.lower() in VID_EXT)
+            if label not in warned:
+                warned.add(label)
+                print(f"[warn] {DATASET}: 未归档的类别 '{cls_dir.name}', 已跳过。"
+                      f"请在 era.py 的 ANOMALY/NORMAL/EXCLUDE 中补充")
             continue
 
-        for vid in iter_videos(cls_dir):
-            caption_list = caps.get(vid.stem, [])
+        for vid in sorted(x for x in cls_dir.iterdir()
+                          if x.is_file() and x.suffix.lower() in VID_EXT):
+            stem = vid.stem.strip()          # 官方文件名带尾空格: "Concert_016 .mp4"
+            caption_list = caps.get(stem, []) or caps.get(vid.stem, [])
 
             def _events():
                 if not kind:
@@ -125,7 +172,7 @@ def build(root: str, frames_dir: str | None = None, n_frames: int = 3,
 
             if modality in ("video", "both"):
                 scenes.append(Scene(
-                    image_id=f"{DATASET}_{label}_{vid.stem}",
+                    image_id=f"{DATASET}_{label}_{stem}",
                     image_path=str(vid), modality="video", video_path=str(vid),
                     width=640, height=640,
                     source_dataset=DATASET, license=LICENSE, view=view,
@@ -138,11 +185,11 @@ def build(root: str, frames_dir: str | None = None, n_frames: int = 3,
                 if not frames_dir:
                     raise ValueError("modality 含 frame 时必须给 --frames-dir")
                 frames = extract_frames(vid, Path(frames_dir) / label, n_frames=n_frames,
-                                        prefix=f"{label}__{vid.stem}")
+                                        prefix=f"{label}__{stem}")
                 for fi, fp in enumerate(frames):
                     w, h = image_size(fp)
                     scenes.append(Scene(
-                        image_id=f"{DATASET}_{label}_{vid.stem}_frame{fi}",
+                        image_id=f"{DATASET}_{label}_{stem}_frame{fi}",
                         image_path=str(fp), width=w or 640, height=h or 640,
                         source_dataset=DATASET, license=LICENSE, view=view,
                         events=_events(),
@@ -158,4 +205,60 @@ def build(root: str, frames_dir: str | None = None, n_frames: int = 3,
     if caps:
         n_cap = sum(1 for s in scenes if s.caption)
         print(f"[{DATASET}] 已挂上 CapERA caption: {n_cap}/{len(scenes)}")
+    return scenes
+
+
+def build_single_frames(root: str, view: str = "uav",
+                        include_normal: bool = True) -> list[Scene]:
+    """ERA 官方的 SingleFrames/ 单帧分类数据。
+
+    与视频样本互补: 视频教模型看运动, 单帧教它从静态画面判断。两者都要,
+    但 image_id 前缀不同, 不会被当成重复。
+    """
+    r = Path(root)
+    sf = next((d for d in (r / "SingleFrames", r) if d.is_dir()), None)
+    if sf is None:
+        return []
+    scenes: list[Scene] = []
+    stat = {"anomaly": 0, "normal": 0, "excluded": 0, "unknown": 0}
+
+    for d in sorted(x for x in sf.rglob("*") if x.is_dir() and not x.name.startswith(".")):
+        label = _norm_label(d.name)
+        if label in SPLIT_DIRS:
+            continue
+        imgs = [x for x in d.iterdir() if x.is_file() and x.suffix.lower() in
+                (".jpg", ".jpeg", ".png", ".bmp")]
+        if not imgs:
+            continue
+        if label in EXCLUDE:
+            stat["excluded"] += len(imgs)
+            continue
+        if label in ANOMALY:
+            kind, subtype = ANOMALY[label]
+        elif label in NORMAL:
+            if not include_normal:
+                continue
+            kind, subtype = None, None
+        else:
+            stat["unknown"] += len(imgs)
+            continue
+
+        for img in sorted(imgs):
+            w, h = image_size(img)
+            events = []
+            if kind:
+                ev = {"rule": None, "src_label": d.name}
+                if subtype:
+                    ev["subtype"] = subtype
+                events = [Event(type=kind, conf=1.0, evidence=ev)]
+            scenes.append(Scene(
+                image_id=f"{DATASET}-SF_{label}_{img.stem.strip()}",
+                image_path=str(img), width=w or 640, height=h or 640,
+                source_dataset=DATASET + "-SingleFrames", license=LICENSE, view=view,
+                events=events, meta={"src_label": d.name}))
+        stat["anomaly" if kind else "normal"] += len(imgs)
+
+    print(f"[{DATASET}-SingleFrames] {len(scenes)} 张单帧 "
+          f"(异常 {stat['anomaly']} / 正常 {stat['normal']} / "
+          f"排除 {stat['excluded']} / 未归档 {stat['unknown']})")
     return scenes

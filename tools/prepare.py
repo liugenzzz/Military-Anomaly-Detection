@@ -93,6 +93,8 @@ def main() -> None:
     p.add_argument("--n-frames", type=int, default=3)
     p.add_argument("--capera", default=None, help="CapERA caption json")
     p.add_argument("--no-normal", action="store_true", help="不采集正常类别")
+    p.add_argument("--single-frames", action="store_true",
+                   help="同时采集官方 SingleFrames/ 单帧分类数据(与视频样本互补)")
     p.add_argument("--view", default="uav")
     add_out(p)
 
@@ -171,6 +173,9 @@ def main() -> None:
     elif a.cmd == "era":
         scenes = era.build(a.root, a.frames_dir, a.n_frames, a.capera, a.view,
                            include_normal=not a.no_normal, modality=a.modality)
+        if a.single_frames:
+            scenes += era.build_single_frames(a.root, a.view,
+                                              include_normal=not a.no_normal)
     elif a.cmd == "dronecrowd":
         scenes = dronecrowd.build(a.root, a.ann_dir, a.stride, a.head_half, a.view)
     elif a.cmd == "visdrone-det":

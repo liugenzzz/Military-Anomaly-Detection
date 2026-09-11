@@ -82,28 +82,39 @@ def check_visdrone_mot(d: Path) -> list[str]:
 
 
 def check_era(d: Path) -> list[str]:
-    subs = [x for x in d.iterdir() if x.is_dir() and x.name != "archives"]
-    vids = {x.name: _count(x, VID) for x in subs}
-    vids = {k: v for k, v in vids.items() if v}
-    if not vids:
-        return [f"未找到按类别分目录的视频（当前子目录: {[x.name for x in subs][:6]}）"]
-    from ds.era import ANOMALY, EXCLUDE, NORMAL, _norm_label
-    a = sum(v for k, v in vids.items() if _norm_label(k) in ANOMALY)
-    n = sum(v for k, v in vids.items() if _norm_label(k) in NORMAL)
-    e = sum(v for k, v in vids.items() if _norm_label(k) in EXCLUDE)
-    u = sum(v for k, v in vids.items()
-            if _norm_label(k) not in set(ANOMALY) | NORMAL | EXCLUDE)
-    out = [f"{len(vids)} 个类别目录, 共 {sum(vids.values())} 段视频",
+    """直接复用适配器的类别识别逻辑, 免得体检与实际处理两套口径对不上。"""
+    from ds.era import ANOMALY, EXCLUDE, NORMAL, _class_dirs_all, _norm_label
+    from ds.common import VID_EXT
+
+    cls_dirs = _class_dirs_all(d)
+    if not cls_dirs:
+        return [f"未找到含视频的类别目录（子目录: {[x.name for x in d.iterdir() if x.is_dir()][:6]}）"]
+
+    known = set(ANOMALY) | NORMAL | EXCLUDE
+    tally: dict[str, int] = {}
+    for cd in cls_dirs:
+        n = sum(1 for x in cd.iterdir() if x.is_file() and x.suffix.lower() in VID_EXT)
+        tally[_norm_label(cd.name)] = tally.get(_norm_label(cd.name), 0) + n
+
+    a = sum(v for k, v in tally.items() if k in ANOMALY)
+    n = sum(v for k, v in tally.items() if k in NORMAL)
+    e = sum(v for k, v in tally.items() if k in EXCLUDE)
+    u = {k: v for k, v in tally.items() if k not in known}
+    out = [f"{len(tally)} 个类别, 共 {sum(tally.values())} 段视频",
            f"映射为异常 {a} 段 / 安全负样本 {n} 段 / 歧义已排除 {e} 段"]
     if u:
-        unk = [k for k in vids if _norm_label(k) not in set(ANOMALY) | NORMAL | EXCLUDE]
-        out.append(f"未归档类别 {u} 段: {unk[:6]} —— 需在 ds/era.py 里补映射")
+        out.append(f"未归档类别 {sum(u.values())} 段: {list(u)[:6]} —— 需在 ds/era.py 里补映射")
+    sf = d / "SingleFrames"
+    if sf.is_dir():
+        out.append(f"另有官方 SingleFrames/ 单帧数据 {_count(sf, IMG)} 张, "
+                   f"用 --single-frames 一并采集")
     return out
 
 
 def check_coco(d: Path) -> list[str]:
+    from ds.common import looks_like_coco
     js = [p for p in d.rglob("*.json")
-          if '"annotations"' in p.read_text(encoding="utf-8", errors="ignore")[:4000]]
+          if not p.name.startswith(".") and looks_like_coco(p)]
     if not js:
         return ["未找到 COCO 标注 json"]
     out = []

@@ -20,7 +20,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-from ds.common import image_size, iter_images
+from ds.common import image_size, iter_images, looks_like_coco
 from scene import Event, Obj, Scene
 
 DATASET = "FASDD_UAV"
@@ -31,12 +31,13 @@ CLS_TO_EVENT = {"fire": "explosion", "smoke": "smoke"}
 
 
 def _coco_files(root: Path) -> list[Path]:
+    # 实际发布形态: annotations/COCO_UAV/Annotations/{train,val,test}.json
     cands = [p for p in root.rglob("*.json")
-             if "coco" in str(p).lower() or "instances" in p.name.lower()]
+             if ("coco" in str(p).lower() or "instances" in p.name.lower())
+             and not p.name.startswith(".")]
     if cands:
         return sorted(cands)
-    return [p for p in root.rglob("*.json")
-            if '"annotations"' in p.read_text(encoding="utf-8", errors="ignore")[:4000]]
+    return [p for p in root.rglob("*.json") if looks_like_coco(p)]
 
 
 def build(root: str, view: str = "uav", keep_negatives: bool = True) -> list[Scene]:

@@ -164,20 +164,30 @@ def _cv2_frames(video, out, stem, n_frames, fps, span) -> list[Path]:
 
 
 # ---------------------------------------------------------------- 标注格式
+def looks_like_coco(p: Path, window: int = 1 << 20) -> bool:
+    """判断是不是 COCO json。
+
+    **不能只读开头几 KB**: COCO 的结构是 {"images":[...几万条...],"annotations":[...]},
+    "annotations" 这个键往往在几十万字符之后才出现。窗口取 1MB, 并且只要
+    命中 categories/annotations 任一即可。
+    """
+    try:
+        with p.open("r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(window)
+    except OSError:
+        return False
+    return '"annotations"' in head or '"categories"' in head
+
+
 def detect_ann_format(root: str | Path) -> str:
     """探测标注格式: coco | voc | yolo | dota | unknown。
 
     很多社区数据集(尤其 Mendeley/Kaggle)不声明格式, 探测比让用户猜靠谱。
     """
     p = Path(root)
-    if any(p.rglob("*.json")):
-        for j in list(p.rglob("*.json"))[:5]:
-            try:
-                d = json.loads(j.read_text(encoding="utf-8"))
-                if isinstance(d, dict) and {"images", "annotations", "categories"} <= set(d):
-                    return "coco"
-            except Exception:
-                continue
+    for j in list(p.rglob("*.json"))[:20]:
+        if looks_like_coco(j):
+            return "coco"
     if any(p.rglob("*.xml")):
         return "voc"
     txts = list(p.rglob("*.txt"))[:20]

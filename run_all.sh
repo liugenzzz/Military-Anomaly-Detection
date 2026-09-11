@@ -32,7 +32,7 @@ if D=$(resolve Mendeley-UAV-Military mendeley Mendeley); then run $PY tools/prep
 if D=$(resolve FASDD_UAV FASDD);       then run $PY tools/prepare.py fasdd --root "$D" --out "$OUT/interim/fasdd.jsonl"; else SKIPPED+=("FASDD_UAV(smoke 唯一来源)"); fi
 if D=$(resolve ERA era); then
   CAP=$(find "$DATA" -maxdepth 3 -iname '*.json' -ipath '*cap*' -print -quit 2>/dev/null)
-  run $PY tools/prepare.py era --root "$D" --modality video \
+  run $PY tools/prepare.py era --root "$D" --modality video --single-frames \
       ${CAP:+--capera "$CAP"} --out "$OUT/interim/era.jsonl"
 else SKIPPED+=("ERA"); fi
 if D=$(resolve DroneCrowd dronecrowd); then run $PY tools/prepare.py dronecrowd --root "$D" --stride 30 --out "$OUT/interim/dronecrowd.jsonl"; else SKIPPED+=("DroneCrowd"); fi
