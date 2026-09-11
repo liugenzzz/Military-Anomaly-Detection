@@ -44,6 +44,26 @@
 **每个侧面的实际 Q/A 样例（供审阅修改）见 [docs/13_sample_qa.md](docs/13_sample_qa.md)**；
 **方位指代与坐标的问法拆分、轮数/图数的反同质化配比见 [docs/14_qa_form_design.md](docs/14_qa_form_design.md)**。
 
+## 一条命令跑完
+
+```bash
+bash run_all.sh /path/to/数据根目录            # 预处理 → 派生 → 筛选 → golden → 规则生成 → 导出 LLM 请求
+python tools/doctor.py --root /path/to/数据根目录   # 只体检: 看手上的数据能产出哪些异常类
+```
+
+没下到的数据集会自动跳过并在末尾列出，不会中断流程。
+
+## 三种输入形态
+
+| 形态 | 用在哪 | 输出字段 |
+|---|---|---|
+| `image` 单图 | MAR20 / Mendeley / FASDD / DOTA / VisDrone-DET 等静态数据集 | `images` |
+| `video` 整段视频 | **ERA 的 5 秒片段**（人群运动、火焰跳动只有视频看得到，抽成静帧就丢了） | `videos` |
+| `multi_image` 多帧序列 | 越界移动（需要逐帧对位判断跨越时机） | `images` |
+
+图像样本与视频样本**分文件落盘**（`train.json` / `train_video.json`），因为在 LLaMA-Factory
+里它们是两个数据集条目，`columns` 分别映射 `images` 与 `videos`，混在一个文件里会加载失败。
+
 ## 快速开始
 
 ```bash

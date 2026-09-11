@@ -283,6 +283,17 @@ def cmd_screen(args, onto):
 FACTS_KEEP_BOXES = {"reason"}
 
 
+def _modality_note(s: Scene) -> str:
+    """告诉模型这是视频还是静帧 —— 不说明的话, 模型不知道自己能不能谈运动。"""
+    if s.modality == "video":
+        return ("## 输入形态\n这是一段约 5 秒的视频。你可以描述运动、变化与持续过程，"
+                "但**不要凭空推断视频之外的时间**。\n")
+    if s.modality == "multi_image":
+        return (f"## 输入形态\n这是 {len(s.frames)} 帧按时间先后排列的画面。"
+                "可以描述帧与帧之间的变化，帧序即时序。\n")
+    return "## 输入形态\n这是一张静止画面。**不要描述运动、变化或持续过程**，单帧看不出这些。\n"
+
+
 def trim_facts(facts: dict[str, Any], facet: str) -> dict[str, Any]:
     """按侧面裁剪事实包: 描述类去掉逐目标坐标, 只留汇总与事件。"""
     if facet in FACTS_KEEP_BOXES:
@@ -338,8 +349,8 @@ def cmd_generate(args, onto):
             facts_str = json.dumps(trim_facts(facts, fa.kind), ensure_ascii=False, indent=1)
             reqs.append({
                 "image_id": s.image_id, "image_path": s.image_path,
-                "images": s.meta.get("frames") or [s.image_path],
-                "kind": "describe", "facet": fa.kind, "anomaly": anomaly,
+                "media_field": s.media[0], "media": s.media[1],
+                "modality": s.modality, "kind": "describe", "facet": fa.kind, "anomaly": anomaly,
                 "question": q, "must_not": bans, "facts": facts,
                 "source_dataset": s.source_dataset, "license": s.license,
                 "width": s.width, "height": s.height,
@@ -349,7 +360,8 @@ def cmd_generate(args, onto):
                     answer_spec=fa.answer_spec,
                     q_example=fa.q_example or (fa.q_bank[0] if fa.q_bank else q),
                     a_example=fa.example_for(anomaly),
-                    question=q, must_not="、".join(bans) or "（无）"),
+                    question=q, must_not="、".join(bans) or "（无）",
+                    modality_note=_modality_note(s)),
             })
         # 推理题: 有事件或困难负样本的图才出
         if (s.events or s.meta.get("hard_negative")) and rng.random() < args.reason_ratio:
@@ -357,8 +369,8 @@ def cmd_generate(args, onto):
             rq = rng.choice(asks["reason"].lines).replace("{zh}", zh.get(anomaly, "异常"))
             reqs.append({
                 "image_id": s.image_id, "image_path": s.image_path,
-                "images": s.meta.get("frames") or [s.image_path],
-                "kind": "reason", "facet": "reason", "anomaly": anomaly,
+                "media_field": s.media[0], "media": s.media[1],
+                "modality": s.modality, "kind": "reason", "facet": "reason", "anomaly": anomaly,
                 "question": rq, "must_not": [], "facts": facts,
                 "source_dataset": s.source_dataset, "license": s.license,
                 "width": s.width, "height": s.height,
@@ -461,14 +473,17 @@ def cmd_verify(args, onto):
                     dim_fail[d] = dim_fail.get(d, 0) + 1
                 continue
         stat["pass"] += 1
-        n_img = len(r["images"])
+        field = r.get("media_field", "images")
+        paths = r.get("media") or [r["image_path"]]
+        tok = "<video>" if field == "videos" else "<image>"
         out.append({
             "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": "<image>" * n_img + r["question"]},
+                         {"role": "user", "content": tok * len(paths) + r["question"]},
                          {"role": "assistant", "content": r["answer"]}],
-            "images": r["images"],
+            field: paths,
             "extra": {"image_id": r["image_id"], "task": r["kind"], "facet": r["facet"],
-                      "gen": "llm", "n_turns": 1, "n_images": n_img,
+                      "gen": "llm", "n_turns": 1,
+                      "modality": r.get("modality", "image"), "n_media": len(paths),
                       "anomaly": [r["anomaly"]],
                       "source_dataset": r["source_dataset"], "license": r["license"],
                       "image_width": r["width"], "image_height": r["height"],
@@ -476,9 +491,16 @@ def cmd_verify(args, onto):
                       "review": v or "skipped"},
         })
 
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.out).write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"落盘 {len(out)} 条 -> {args.out}")
+    base = Path(args.out)
+    base.parent.mkdir(parents=True, exist_ok=True)
+    img = [s for s in out if "videos" not in s]
+    vid = [s for s in out if "videos" in s]
+    base.write_text(json.dumps(img, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"落盘 {len(img)} 条(图像) -> {base}")
+    if vid:
+        vp = base.with_name(base.stem + "_video" + base.suffix)
+        vp.write_text(json.dumps(vid, ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"落盘 {len(vid)} 条(视频) -> {vp}")
     if verdicts:
         rate = stat["fail"] / max(1, stat["fail"] + stat["pass"])
         print(f"  review: 通过 {stat['pass']} / 打回 {stat['fail']} (打回率 {rate:.1%})")

@@ -36,10 +36,13 @@ def _report(scenes, out: str) -> None:
                  for s in scenes for e in s.events)
     n_obj = sum(len(s.objects) for s in scenes)
     n_cap = sum(1 for s in scenes if s.caption)
+    mod = Counter(s.modality for s in scenes)
     n_hn = sum(1 for s in scenes if s.meta.get("hard_negative_source"))
     print(f"\n写出 {len(scenes)} 个 scene -> {out}")
     print(f"  目标框合计 {n_obj}" + (f", 带 caption {n_cap}" if n_cap else "")
           + (f", 同场景困难负样本 {n_hn}" if n_hn else ""))
+    if len(mod) > 1 or "image" not in mod:
+        print("  输入形态:", dict(mod))
     if ev:
         print("  自带事件标签:", dict(ev))
     if len(by_src) > 1:
@@ -84,7 +87,9 @@ def main() -> None:
 
     p = sub.add_parser("era", help="ERA 航拍事件视频 + CapERA caption(需抽帧)")
     p.add_argument("--root", required=True)
-    p.add_argument("--frames-dir", required=True)
+    p.add_argument("--modality", default="video", choices=["video", "frame", "both"],
+                   help="video 保留整段视频(默认) / frame 抽帧 / both 两种都产")
+    p.add_argument("--frames-dir", default=None, help="modality 含 frame 时必填")
     p.add_argument("--n-frames", type=int, default=3)
     p.add_argument("--capera", default=None, help="CapERA caption json")
     p.add_argument("--no-normal", action="store_true", help="不采集正常类别")
@@ -165,7 +170,7 @@ def main() -> None:
         scenes = fasdd.build(a.root, a.view, keep_negatives=not a.drop_negatives)
     elif a.cmd == "era":
         scenes = era.build(a.root, a.frames_dir, a.n_frames, a.capera, a.view,
-                           include_normal=not a.no_normal)
+                           include_normal=not a.no_normal, modality=a.modality)
     elif a.cmd == "dronecrowd":
         scenes = dronecrowd.build(a.root, a.ann_dir, a.stride, a.head_half, a.view)
     elif a.cmd == "visdrone-det":

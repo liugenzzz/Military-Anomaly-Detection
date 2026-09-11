@@ -24,7 +24,7 @@ def main() -> None:
     problems: list[str] = []
     qa_types, anomalies, sources = Counter(), Counter(), Counter()
     styles, turns = Counter(), Counter()
-    facets, gens, imgs = Counter(), Counter(), Counter()
+    facets, gens, imgs, mods = Counter(), Counter(), Counter(), Counter()
     total = 0
     missing = set()
 
@@ -40,18 +40,23 @@ def main() -> None:
                 problems.append(f"{fp}#{i}: messages 必须是 system? + user/assistant 交替")
                 continue
             turns[(len(body) // 2)] += 1
-            n_tok = sum(m["content"].count("<image>") for m in body)
-            if n_tok != len(s.get("images", [])):
-                problems.append(f"{fp}#{i}: <image> 数量({n_tok}) 与 images 数量({len(s.get('images', []))}) 不一致")
-            if body[0]["content"].count("<image>") != n_tok:
-                problems.append(f"{fp}#{i}: <image> 应全部出现在首轮 user 消息中")
+            field = "videos" if "videos" in s else "images"
+            tok = "<video>" if field == "videos" else "<image>"
+            n_tok = sum(m["content"].count(tok) for m in body)
+            if n_tok != len(s.get(field, [])):
+                problems.append(f"{fp}#{i}: {tok} 数量({n_tok}) 与 {field} 数量"
+                                f"({len(s.get(field, []))}) 不一致")
+            if body[0]["content"].count(tok) != n_tok:
+                problems.append(f"{fp}#{i}: {tok} 应全部出现在首轮 user 消息中")
+            if "images" in s and "videos" in s:
+                problems.append(f"{fp}#{i}: 同时含 images 与 videos, LLaMA-Factory 无法加载")
             answers = " ".join(m["content"] for m in body[1::2])
             for box in BOX_RE.findall(answers):
                 x1, y1, x2, y2 = map(int, box)
                 if not (0 <= x1 < x2 <= args.box_scale and 0 <= y1 < y2 <= args.box_scale):
                     problems.append(f"{fp}#{i}: 坐标越界或反向 {box}")
             if args.check_images:
-                for im in s.get("images", []):
+                for im in s.get(field, []):
                     if not Path(im).exists():
                         missing.add(im)
             ex = s.get("extra", {})
@@ -59,7 +64,8 @@ def main() -> None:
             if ex.get("facet"):
                 facets[ex["facet"]] += 1
             gens[ex.get("gen", "-")] += 1
-            imgs[ex.get("n_images", 1)] += 1
+            imgs[ex.get("n_media", ex.get("n_images", 1))] += 1
+            mods[ex.get("modality", "image")] += 1
             for a in (ex.get("anomaly") or ["?"]):
                 anomalies[a] += 1
             sources[ex.get("source_dataset", "?")] += 1
@@ -79,7 +85,8 @@ def main() -> None:
     show("生成方式", Counter({"规则" if k == "rule" else ("LLM" if k == "llm" else k): v
                               for k, v in gens.items()}))
     show("对话轮数分布", Counter({f"{k} 轮": v for k, v in turns.items()}))
-    show("图片数分布", Counter({f"{k} 图": v for k, v in imgs.items()}))
+    show("输入形态", mods)
+    show("媒体数分布", Counter({f"{k} 个": v for k, v in imgs.items()}))
 
     neg = anomalies.get("normal", 0) / max(1, total)
     print(f"\n正常(负)样本占比 {neg:.1%}  阈值 {args.min_negative_ratio:.0%}"

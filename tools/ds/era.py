@@ -4,7 +4,8 @@ ERA:     <https://lcmou.github.io/ERA_Dataset/>   按类别分目录存放视频
 CapERA:  <https://github.com/yakoubbazi/CapEra>   每段视频 5 条人工 caption
 
 处理要点:
-  - 每段视频抽 3 帧(首/中/尾)。5 秒视频抽更多帧只会产生近重复
+  - **默认保留整段视频**(modality=video)。5 秒片段天然适合视频输入, 而且人群运动、
+    火焰跳动这些线索只有视频看得到, 抽成静帧就丢了。需要静帧时用 --modality frame
   - 25 个类别分三档处理, 这个划分是关键:
       ANOMALY  映射为我们的异常事件
       NORMAL   明确无烟火的场景 -> 安全负样本(其中运动车辆场景是很好的困难负样本)
@@ -82,9 +83,11 @@ def _load_capera(path: str | Path) -> dict[str, list[str]]:
     return out
 
 
-def build(root: str, frames_dir: str, n_frames: int = 3,
+def build(root: str, frames_dir: str | None = None, n_frames: int = 3,
           capera_json: str | None = None, view: str = "uav",
-          include_normal: bool = True) -> list[Scene]:
+          include_normal: bool = True, modality: str = "video") -> list[Scene]:
+    """modality: video 保留整段视频(推荐, 5 秒片段天然适合视频输入);
+    frame 抽帧成单图; both 两种都产(会让同一段视频出现在两种样本里, 注意去重)。"""
     r = Path(root)
     caps = _load_capera(capera_json) if capera_json else {}
     scenes: list[Scene] = []
@@ -110,33 +113,49 @@ def build(root: str, frames_dir: str, n_frames: int = 3,
             continue
 
         for vid in iter_videos(cls_dir):
-            out_sub = Path(frames_dir) / label
-            frames = extract_frames(vid, out_sub, n_frames=n_frames,
-                                    prefix=f"{label}__{vid.stem}")
-            if not frames:
-                continue
             caption_list = caps.get(vid.stem, [])
-            for fi, fp in enumerate(frames):
-                w, h = image_size(fp)
-                events = []
-                if kind:
-                    ev = {"rule": None, "src_label": cls_dir.name}
-                    if subtype:
-                        ev["subtype"] = subtype
-                    events = [Event(type=kind, conf=1.0, evidence=ev)]
+
+            def _events():
+                if not kind:
+                    return []
+                ev = {"rule": None, "src_label": cls_dir.name}
+                if subtype:
+                    ev["subtype"] = subtype
+                return [Event(type=kind, conf=1.0, evidence=ev)]
+
+            if modality in ("video", "both"):
                 scenes.append(Scene(
-                    image_id=f"{DATASET}_{label}_{vid.stem}_frame{fi}",
-                    image_path=str(fp), width=w or 640, height=h or 640,
+                    image_id=f"{DATASET}_{label}_{vid.stem}",
+                    image_path=str(vid), modality="video", video_path=str(vid),
+                    width=640, height=640,
                     source_dataset=DATASET, license=LICENSE, view=view,
-                    events=events,
-                    caption=caption_list[fi % len(caption_list)] if caption_list else None,
+                    events=_events(),
+                    caption=caption_list[0] if caption_list else None,
                     meta={"src_video": vid.name, "src_label": cls_dir.name,
-                          "frame_idx": fi, "all_captions": caption_list}))
+                          "duration_s": 5, "all_captions": caption_list}))
+
+            if modality in ("frame", "both"):
+                if not frames_dir:
+                    raise ValueError("modality 含 frame 时必须给 --frames-dir")
+                frames = extract_frames(vid, Path(frames_dir) / label, n_frames=n_frames,
+                                        prefix=f"{label}__{vid.stem}")
+                for fi, fp in enumerate(frames):
+                    w, h = image_size(fp)
+                    scenes.append(Scene(
+                        image_id=f"{DATASET}_{label}_{vid.stem}_frame{fi}",
+                        image_path=str(fp), width=w or 640, height=h or 640,
+                        source_dataset=DATASET, license=LICENSE, view=view,
+                        events=_events(),
+                        caption=caption_list[fi % len(caption_list)] if caption_list else None,
+                        meta={"src_video": vid.name, "src_label": cls_dir.name,
+                              "frame_idx": fi, "all_captions": caption_list}))
             stat["anomaly" if kind else "normal"] += 1
 
-    print(f"[{DATASET}] 视频: 异常 {stat['anomaly']} / 正常 {stat['normal']} / "
-          f"排除 {stat['excluded']} / 未归档 {stat['unknown']}  ->  {len(scenes)} 帧")
+    n_v = sum(1 for s in scenes if s.modality == "video")
+    print(f"[{DATASET}] 视频: 异常 {stat['anomaly']} 段 / 正常 {stat['normal']} 段 / "
+          f"排除 {stat['excluded']} / 未归档 {stat['unknown']}  ->  "
+          f"{n_v} 个视频样本" + (f" + {len(scenes) - n_v} 个抽帧样本" if len(scenes) > n_v else ""))
     if caps:
         n_cap = sum(1 for s in scenes if s.caption)
-        print(f"[{DATASET}] 已挂上 CapERA caption 的帧: {n_cap}/{len(scenes)}")
+        print(f"[{DATASET}] 已挂上 CapERA caption: {n_cap}/{len(scenes)}")
     return scenes

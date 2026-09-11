@@ -2,29 +2,29 @@
   "military_anomaly_vqa": {
     "file_name": "vqa/train.json",
     "formatting": "sharegpt",
-    "columns": {
-      "messages": "messages",
-      "images": "images"
-    },
-    "tags": {
-      "role_tag": "role",
-      "content_tag": "content",
-      "user_tag": "user",
-      "assistant_tag": "assistant"
-    }
+    "columns": {"messages": "messages", "images": "images"},
+    "tags": {"role_tag": "role", "content_tag": "content",
+             "user_tag": "user", "assistant_tag": "assistant", "system_tag": "system"}
   },
   "military_anomaly_vqa_val": {
     "file_name": "vqa/val.json",
     "formatting": "sharegpt",
-    "columns": {
-      "messages": "messages",
-      "images": "images"
-    },
-    "tags": {
-      "role_tag": "role",
-      "content_tag": "content",
-      "user_tag": "user",
-      "assistant_tag": "assistant"
-    }
+    "columns": {"messages": "messages", "images": "images"},
+    "tags": {"role_tag": "role", "content_tag": "content",
+             "user_tag": "user", "assistant_tag": "assistant", "system_tag": "system"}
+  },
+  "military_anomaly_video": {
+    "file_name": "vqa/train_video.json",
+    "formatting": "sharegpt",
+    "columns": {"messages": "messages", "videos": "videos"},
+    "tags": {"role_tag": "role", "content_tag": "content",
+             "user_tag": "user", "assistant_tag": "assistant", "system_tag": "system"}
+  },
+  "military_anomaly_video_val": {
+    "file_name": "vqa/val_video.json",
+    "formatting": "sharegpt",
+    "columns": {"messages": "messages", "videos": "videos"},
+    "tags": {"role_tag": "role", "content_tag": "content",
+             "user_tag": "user", "assistant_tag": "assistant", "system_tag": "system"}
   }
 }

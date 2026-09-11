@@ -238,12 +238,25 @@ def main() -> None:
     by_ds_total, by_ds_kept = Counter(), Counter()
     staged: list[tuple[Scene, dict | None]] = []
 
+    n_video = 0
     for s in scenes:
         by_ds_total[s.source_dataset] += 1
         prof = PROFILES.get(s.view, PROFILES["default"])
-        st = image_stats(Path(s.image_path))
 
-        reason = gate1(s, st, prof)
+        # 视频样本跳过像素级闸口(闸1/闸3): 拿 PIL 去读 mp4 必然失败,
+        # 不跳过的话整批视频数据会被当成"不可读"全部误杀。
+        # 标注合法性(闸2)、视角(闸4)、VLM 复核(闸5)仍然照常走。
+        is_video = s.modality == "video"
+        st = None if is_video else image_stats(Path(s.image_path))
+        if is_video:
+            n_video += 1
+            if not Path(s.video_path or s.image_path).exists():
+                s.meta["drop_reason"] = "video_missing"
+                reasons["video_missing"] += 1
+                dropped.append(s)
+                continue
+
+        reason = None if is_video else gate1(s, st, prof)
         if not reason:
             reason, warns = gate2(s, vocab)
             warn_counter.update(warns)
@@ -288,6 +301,7 @@ def main() -> None:
         "drop_reasons": dict(reasons.most_common()),
         "warnings": dict(warn_counter.most_common()),
         "uncertain_pool": sum(1 for s in kept if s.meta.get("uncertain")),
+        "video_samples": n_video,
         "by_dataset": {d: {"total": by_ds_total[d], "kept": by_ds_kept[d],
                            "keep_rate": round(by_ds_kept[d] / max(1, by_ds_total[d]), 4)}
                        for d in by_ds_total},
@@ -295,7 +309,8 @@ def main() -> None:
     (out / "screen_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"总计 {n} -> 保留 {len(kept)} ({report['keep_rate']:.1%})")
+    print(f"总计 {n} -> 保留 {len(kept)} ({report['keep_rate']:.1%})"
+          + (f"，其中视频样本 {n_video} 个（跳过像素级闸口）" if n_video else ""))
     for k, v in reasons.most_common():
         print(f"  剔除 {k:28s} {v}")
     if report["uncertain_pool"]:

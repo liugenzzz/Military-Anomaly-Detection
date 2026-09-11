@@ -164,16 +164,18 @@ class RuleBuilder:
 
     def _mk(self, s: Scene, turns: list[tuple[str, str]], task: str, **extra) -> dict:
         msgs: list[dict] = [{"role": "system", "content": self.system}]
-        n_img = len(s.meta.get("frames", [])) or 1
+        field, paths = s.media
+        tok = "<video>" if field == "videos" else "<image>"
         for i, (q, a) in enumerate(turns):
             msgs.append({"role": "user",
-                         "content": ("<image>" * n_img + q) if i == 0 else q})
+                         "content": (tok * len(paths) + q) if i == 0 else q})
             msgs.append({"role": "assistant", "content": a})
         return {
             "messages": msgs,
-            "images": s.meta.get("frames") or [s.image_path],
+            field: paths,
             "extra": {"image_id": s.image_id, "task": task, "gen": "rule",
-                      "n_turns": len(turns), "n_images": n_img,
+                      "n_turns": len(turns), "modality": s.modality,
+                      "n_media": len(paths),
                       "anomaly": s.anomaly_types or ["normal"],
                       "hard_negative": bool(s.meta.get("hard_negative")),
                       "source_dataset": s.source_dataset, "license": s.license,
@@ -354,9 +356,16 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     def _write(name: str, data: list[dict]) -> None:
-        (out / f"{name}.json").write_text(json.dumps(data, ensure_ascii=False, indent=1),
-                                          encoding="utf-8")
-        print(f"  {name}.json  {len(data)} 条")
+        """图像样本与视频样本分开落盘 —— LLaMA-Factory 里它们是两个数据集条目,
+        columns 分别映射 images 与 videos, 混在一个文件里会加载失败。"""
+        for suffix, sel in (("", lambda s: "videos" not in s),
+                            ("_video", lambda s: "videos" in s)):
+            part = [s for s in data if sel(s)]
+            if not part:
+                continue
+            (out / f"{name}{suffix}.json").write_text(
+                json.dumps(part, ensure_ascii=False, indent=1), encoding="utf-8")
+            print(f"  {name}{suffix}.json  {len(part)} 条")
 
     if args.no_split:
         _write("all", samples)
@@ -367,12 +376,14 @@ def main() -> None:
     from collections import Counter
     tasks = Counter(s["extra"]["task"] for s in samples)
     turns = Counter(s["extra"]["n_turns"] for s in samples)
+    mods = Counter(s["extra"]["modality"] for s in samples)
     n_norm = sum(1 for s in samples if s["extra"]["anomaly"] == ["normal"])
     print(f"\n共 {len(samples)} 条 / {len(scenes)} 个 scene")
     print(f"正常样本占比 {n_norm / max(1, len(samples)):.1%}"
           f"（目标 ≥{onto.get('negative_ratio_target', 0.3):.0%}）")
     print("  任务:", dict(tasks.most_common()))
     print("  轮数:", {f"{k}轮": v for k, v in sorted(turns.items())})
+    print("  形态:", dict(mods))
 
 
 if __name__ == "__main__":

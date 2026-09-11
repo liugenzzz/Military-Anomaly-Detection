@@ -61,7 +61,25 @@ class Scene:
     tracks: dict[str, list[list[float]]] = field(default_factory=dict)
     events: list[Event] = field(default_factory=list)
     caption: str | None = None
+    # 三种输入形态: image(单图) / multi_image(多帧序列) / video(整段视频)。
+    # 静态数据集保持单图, ERA 这类短视频保持视频, 越界这类需要逐帧对位的用多帧。
+    modality: str = "image"
+    frames: list[str] = field(default_factory=list)   # multi_image 时按时序排列
+    video_path: str | None = None                     # video 时的视频文件
     meta: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def media(self) -> tuple[str, list[str]]:
+        """返回 (字段名, 路径列表), 供生成器直接写进 ShareGPT。"""
+        if self.modality == "video" and self.video_path:
+            return "videos", [self.video_path]
+        if self.modality == "multi_image" and self.frames:
+            return "images", list(self.frames)
+        return "images", [self.image_path]
+
+    @property
+    def n_media(self) -> int:
+        return len(self.media[1])
 
     @property
     def diag(self) -> float:
@@ -100,6 +118,9 @@ class Scene:
             tracks={k: v for k, v in d.get("tracks", {}).items()},
             events=[Event(**e) for e in d.get("events", [])],
             caption=d.get("caption"),
+            modality=d.get("modality", "image"),
+            frames=list(d.get("frames", [])),
+            video_path=d.get("video_path"),
             meta=d.get("meta", {}),
         )
 
