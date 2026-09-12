@@ -36,6 +36,23 @@ SPEC = {
 }
 
 
+def _norm_dir(name: str) -> str:
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
+def _near_match(dir_name: str, cand: str) -> bool:
+    """目录名被改过一点还能认出来: MAR201 / MAR20_v2 / mar20-official 都算 MAR20。
+
+    只认"候选名 + 很短的尾巴"。不能放宽成前缀匹配 —— 那样找 VisDrone 会先撞上
+    VisDrone2019-DET-train, 把 DET 当成 MOT 用。
+    """
+    a, b = _norm_dir(dir_name), _norm_dir(cand)
+    if not a.startswith(b) or a == b:
+        return len(a) == len(b) and a == b
+    tail = dir_name[len(cand):] if dir_name.lower().startswith(cand.lower()) else ""
+    return len(a) - len(b) <= 4 or tail[:1] in ("-", "_", ".", " ")
+
+
 def _find(root: Path, names: list[str]) -> Path | None:
     for n in names:
         p = root / n
@@ -45,6 +62,11 @@ def _find(root: Path, names: list[str]) -> Path | None:
         hits = [d for d in root.rglob(n) if d.is_dir()]
         if hits:
             return hits[0]
+    # 名字对不上时再按"近似名"找一遍, 只看前两层
+    for n in names:
+        for d in sorted(root.glob("*")) + sorted(root.glob("*/*")):
+            if d.is_dir() and _near_match(d.name, n):
+                return d
     return None
 
 

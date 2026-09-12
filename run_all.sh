@@ -32,11 +32,20 @@ MEDIA_MODE="${MEDIA_MODE:-hardlink}"       # hardlink | symlink | copy
 mkdir -p "$OUT"/{interim,screened,golden,vqa_rule,vqa_llm,frames,tiles}
 SKIPPED=()
 
-# 解析数据集目录: 依次试几个常见命名, 找到有内容的就返回其路径
+# 解析数据集目录: 先按给定名字找, 再按"名字 + 很短的尾巴"找(MAR201 / MAR20_v2
+# 这种手动解压时改过的名字), 找到有内容的就返回其路径。
+has_media() {
+  [ -n "$(find "$1" -maxdepth 4 \( -name '*.jpg' -o -name '*.png' -o -name '*.mp4' -o -name '*.avi' \) -print -quit 2>/dev/null)" ]
+}
 resolve() {
   for n in "$@"; do
     d="$DATA/$n"
-    [ -d "$d" ] && [ -n "$(find "$d" -maxdepth 4 \( -name '*.jpg' -o -name '*.png' -o -name '*.mp4' -o -name '*.avi' \) -print -quit 2>/dev/null)" ] && { echo "$d"; return 0; }
+    [ -d "$d" ] && has_media "$d" && { echo "$d"; return 0; }
+  done
+  for n in "$@"; do
+    for d in "$DATA/$n"?  "$DATA/$n"??  "$DATA/$n"[-_.\ ]*; do
+      [ -d "$d" ] && has_media "$d" && { echo "$d"; return 0; }
+    done
   done
   return 1
 }

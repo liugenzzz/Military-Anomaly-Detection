@@ -210,8 +210,41 @@ def _isnum(s: str) -> bool:
         return False
 
 
+def _obb_to_hbb(o: ET.Element) -> list[float] | None:
+    """旋转框 -> 外接水平框。两种写法都认:
+
+      <robndbox><cx><cy><w><h><angle>        roLabelImg 导出(MAR20 的 OBB 就是这个)
+      <bndbox><x0><y0>...<x3><y3>            四点式
+
+    我们的下游任务全部用水平框, 遇到 OBB 取外接矩形。这一步不能省 ——
+    MAR20 官方包里 OBB 和 HBB 是两个目录, 只解压了 OBB 的话, 不认 robndbox
+    就会每张图都解析出 0 个目标, 而且是静默的。
+    """
+    rb = o.find("robndbox")
+    if rb is not None:
+        try:
+            cx, cy = float(rb.findtext("cx", "0")), float(rb.findtext("cy", "0"))
+            bw, bh = float(rb.findtext("w", "0")), float(rb.findtext("h", "0"))
+            ang = float(rb.findtext("angle", "0"))
+        except (TypeError, ValueError):
+            return None
+        ca, sa = abs(math.cos(ang)), abs(math.sin(ang))
+        ew, eh = bw * ca + bh * sa, bw * sa + bh * ca      # 外接矩形的边长
+        return [cx - ew / 2, cy - eh / 2, cx + ew / 2, cy + eh / 2]
+
+    bb = o.find("bndbox")
+    if bb is not None and bb.find("x0") is not None:
+        try:
+            xs = [float(bb.findtext(f"x{i}", "0")) for i in range(4)]
+            ys = [float(bb.findtext(f"y{i}", "0")) for i in range(4)]
+        except (TypeError, ValueError):
+            return None
+        return [min(xs), min(ys), max(xs), max(ys)]
+    return None
+
+
 def parse_voc_xml(path: str | Path) -> tuple[int, int, list[tuple[str, list[float]]]]:
-    """VOC XML -> (w, h, [(cls, [x1,y1,x2,y2])])。兼容缺失 size 节点的文件。"""
+    """VOC XML -> (w, h, [(cls, [x1,y1,x2,y2])])。兼容缺失 size 节点与旋转框。"""
     root = ET.parse(path).getroot()
     size = root.find("size")
     w = int(float(size.findtext("width", "0"))) if size is not None else 0
@@ -220,13 +253,14 @@ def parse_voc_xml(path: str | Path) -> tuple[int, int, list[tuple[str, list[floa
     for o in root.findall("object"):
         name = (o.findtext("name") or "object").strip()
         bb = o.find("bndbox")
-        if bb is None:
-            continue
-        try:
-            objs.append((name, [float(bb.findtext("xmin", "0")), float(bb.findtext("ymin", "0")),
-                                float(bb.findtext("xmax", "0")), float(bb.findtext("ymax", "0"))]))
-        except (TypeError, ValueError):
-            continue
+        if bb is not None and bb.find("xmin") is not None:
+            try:
+                objs.append((name, [float(bb.findtext("xmin", "0")), float(bb.findtext("ymin", "0")),
+                                    float(bb.findtext("xmax", "0")), float(bb.findtext("ymax", "0"))]))
+            except (TypeError, ValueError):
+                continue
+        elif (box := _obb_to_hbb(o)) is not None:
+            objs.append((name, box))
     return w, h, objs
 
 
