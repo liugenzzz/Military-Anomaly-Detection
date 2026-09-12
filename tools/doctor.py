@@ -33,6 +33,9 @@ SPEC = {
     "VisDrone-DET": (["VisDrone2019-DET-train", "VisDrone-DET"], "normal", False),
     "DOTA": (["DOTA", "DOTA-v2.0"], "困难负样本", False),
     "Drone-Anomaly": (["Drone-Anomaly"], "normal", False),
+    # HIVAU-70k 也是只有标注: 它标的是 UCF-Crime / XD-Violence 的视频,
+    # 视频本身要另外下。没有源视频时它只能当 L2 golden 的语料, 训不了。
+    "HIVAU-70k": (["HIVAU-70k", "HIVAU-7Ck", "HIVAU"], "explosion 语料 + L2 golden", False, True),
 }
 
 
@@ -53,21 +56,47 @@ def _near_match(dir_name: str, cand: str) -> bool:
     return len(a) - len(b) <= 4 or tail[:1] in ("-", "_", ".", " ")
 
 
+def _has_payload(d: Path) -> bool:
+    """这个目录里有没有真东西(图/视频/标注), 而不只是压缩包。"""
+    n = 0
+    for f in d.rglob("*"):
+        if f.suffix.lower() in IMG + VID + (".xml", ".txt", ".json", ".csv"):
+            return True
+        n += 1
+        if n > 20000:
+            break
+    return False
+
+
 def _find(root: Path, names: list[str]) -> Path | None:
+    """按名字候选找数据集目录, **优先返回真的解压出内容的那个**。
+
+    这一条是必需的: 同一份数据常常同时存在 MAR20/(只放着压缩包) 和
+    MAR201/(手动解压出来的)。只按名字精确匹配会咬住前者, 然后报"未解压",
+    把旁边已经解压好的目录整个漏掉。
+    """
+    # 按名字逐个找全(精确 -> 嵌套 -> 近似), 再换下一个名字。
+    # 候选名是按"从具体到笼统"排的, 这个顺序不能打乱: 先把
+    # VisDrone2019-MOT-train 在各层找一遍, 找不到才退到笼统的 VisDrone,
+    # 否则 MOT 和 DET 会双双解析到同一个父目录 VisDrone/。
+    cands: list[Path] = []
     for n in names:
         p = root / n
         if p.is_dir():
-            return p
-    for n in names:
-        hits = [d for d in root.rglob(n) if d.is_dir()]
-        if hits:
-            return hits[0]
-    # 名字对不上时再按"近似名"找一遍, 只看前两层
-    for n in names:
+            cands.append(p)
+        # 只往下找两层, 不用 rglob: 数据根下还堆着十几个别的大数据集,
+        # 全树遍历要扫上百万个文件, 体检本身会变成最慢的一步
+        cands += [d for d in (*root.glob(f"*/{n}"), *root.glob(f"*/*/{n}")) if d.is_dir()]
         for d in sorted(root.glob("*")) + sorted(root.glob("*/*")):
             if d.is_dir() and _near_match(d.name, n):
-                return d
-    return None
+                cands.append(d)
+
+    seen: set[Path] = set()
+    uniq = [c for c in cands if not (c in seen or seen.add(c))]
+    for c in uniq:
+        if _has_payload(c):
+            return c
+    return uniq[0] if uniq else None
 
 
 def _count(d: Path, exts: tuple[str, ...], cap: int = 200000) -> int:

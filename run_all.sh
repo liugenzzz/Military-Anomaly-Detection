@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一条命令跑完: 预处理 -> 事件派生 -> 质量筛选 -> golden set -> 规则生成 -> LLM 生成
 #
-#   bash run_all.sh /mnt/si003010kcx0/mmdata/mm_general/military
+#   bash run_all.sh /mnt/si003010kcx0/mmdata/data_process/military
 #
 # 没下到的数据集会自动跳过并在末尾列出, 不会中断流程。
 set -uo pipefail
@@ -10,7 +10,7 @@ OUT="${2:-${OUT_DIR:-data}}"       # 输出目录: 第二个参数, 或环境变
 PY="${PYTHON:-python3}"
 
 # ── LLM 生成: 配了端点就真跑, 没配就只导出请求(离线批推理也能吃这个文件)
-#   VLM_BASE_URL=http://127.0.0.1:8000/v1 VLM_MODEL=qwen2.5-vl-72b-instruct bash run_all.sh <数据根>
+#   VLM_BASE_URL=http://192.168.78.36:3012/v1 VLM_MODEL=Qwen3.6-27B bash run_all.sh <数据根>
 VLM_BASE_URL="${VLM_BASE_URL:-}"
 VLM_MODEL="${VLM_MODEL:-Qwen3.6-27B}"   # 与目标检测那个项目同一套服务
 # review 最好换一个模型: 同一个模型审自己写的答案基本全过, 六维形同虚设
@@ -23,6 +23,11 @@ WORKERS="${WORKERS:-8}"
 FACETS_PER_IMAGE="${FACETS_PER_IMAGE:-4}"
 INLINE_IMAGES="${INLINE_IMAGES:-0}"        # 远端 API 要 base64 内联; 本地 vLLM 挂同一块盘就不用
 RELAX_BELOW="${RELAX_BELOW:-3000}"         # 产量低于这么多张图的类启用放宽档补量, 0 关闭
+# 抽帧间隔。与 configs/ontology.yaml 的 stride 保持一致: 30 对 DroneCrowd 和
+# VisDrone-MOT 太稀(24960 帧只取 832), 近重复由 screen.py 的闸3 兜底。
+STRIDE_CROWD="${STRIDE_CROWD:-8}"
+STRIDE_MOT="${STRIDE_MOT:-8}"
+STRIDE_DA="${STRIDE_DA:-10}"
 # 媒体归集: 填了就把引用到的图片/视频硬链到语料库目录, 并把 json 里的路径改过去
 #   MEDIA_ROOT=/mnt/si003010kcx0/mmdata/data_process/corpus_media
 MEDIA_ROOT="${MEDIA_ROOT:-}"
@@ -38,12 +43,10 @@ has_media() {
   [ -n "$(find "$1" -maxdepth 4 \( -name '*.jpg' -o -name '*.png' -o -name '*.mp4' -o -name '*.avi' \) -print -quit 2>/dev/null)" ]
 }
 resolve() {
+  # 按名字从具体到笼统逐个试; 每个名字都走"本层 -> 下一层 -> 近似名"三步,
+  # 试完一个名字再换下一个 —— 顺序不能打乱, 否则找 MOT 会先撞上笼统的 VisDrone/
   for n in "$@"; do
-    d="$DATA/$n"
-    [ -d "$d" ] && has_media "$d" && { echo "$d"; return 0; }
-  done
-  for n in "$@"; do
-    for d in "$DATA/$n"?  "$DATA/$n"??  "$DATA/$n"[-_.\ ]*; do
+    for d in "$DATA/$n" "$DATA"/*/"$n" "$DATA/$n"? "$DATA/$n"?? "$DATA/$n"[-_.\ ]*; do
       [ -d "$d" ] && has_media "$d" && { echo "$d"; return 0; }
     done
   done
@@ -65,16 +68,16 @@ if D=$(resolve ERA era); then
   run $PY tools/prepare.py era --root "$D" --modality video --single-frames \
       ${CAP:+--capera "$CAP"} --out "$OUT/interim/era.jsonl"
 else SKIPPED+=("ERA"); fi
-if D=$(resolve DroneCrowd dronecrowd); then run $PY tools/prepare.py dronecrowd --root "$D" --stride 30 --out "$OUT/interim/dronecrowd.jsonl"; else SKIPPED+=("DroneCrowd"); fi
+if D=$(resolve DroneCrowd dronecrowd); then run $PY tools/prepare.py dronecrowd --root "$D" --stride "$STRIDE_CROWD" --out "$OUT/interim/dronecrowd.jsonl"; else SKIPPED+=("DroneCrowd"); fi
 if D=$(resolve VisDrone2019-DET-train VisDrone-DET VisDrone/VisDrone2019-DET-train); then
   run $PY tools/prepare.py visdrone-det --root "$D" --out "$OUT/interim/vd_det.jsonl"
 fi
 if D=$(resolve VisDrone2019-MOT-train VisDrone-MOT VisDrone/VisDrone2019-MOT-train); then
-  run $PY tools/prepare.py visdrone-mot --root "$D" --stride 30 --out "$OUT/interim/vd_mot.jsonl"
+  run $PY tools/prepare.py visdrone-mot --root "$D" --stride "$STRIDE_MOT" --out "$OUT/interim/vd_mot.jsonl"
 fi
 [ -f "$OUT/interim/vd_mot.jsonl" ] || SKIPPED+=("VisDrone-MOT(border_crossing 唯一来源)")
 if D=$(resolve DOTA DOTA-v2.0 dota);   then run $PY tools/prepare.py dota --root "$D" --tiles-dir "$OUT/tiles/dota" --out "$OUT/interim/dota.jsonl"; else SKIPPED+=("DOTA"); fi
-if D=$(resolve Drone-Anomaly drone_anomaly); then run $PY tools/prepare.py drone-anomaly --root "$D" --stride 10 --out "$OUT/interim/drone_anomaly.jsonl"; else SKIPPED+=("Drone-Anomaly"); fi
+if D=$(resolve Drone-Anomaly drone_anomaly); then run $PY tools/prepare.py drone-anomaly --root "$D" --stride "$STRIDE_DA" --out "$OUT/interim/drone_anomaly.jsonl"; else SKIPPED+=("Drone-Anomaly"); fi
 
 shopt -s nullglob
 FILES=("$OUT"/interim/*.jsonl)
