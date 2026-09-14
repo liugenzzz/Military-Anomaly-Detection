@@ -127,7 +127,9 @@ for n in "${INTERIM_FILES[@]}"; do
   [ -s "$f" ] && FILES+=("$f")
 done
 [ ${#FILES[@]} -eq 0 ] && { echo "没有任何可用数据, 退出"; exit 1; }
-cat "${FILES[@]}" > "$OUT/all_scenes.jsonl"
+# 用 awk 1 而不是 cat: 某个 jsonl 少了结尾换行时, cat 会把两条记录粘成一行,
+# 而且是静默的 —— 下一步解析才报 "Extra data", 那时已经看不出是哪两条。
+awk 1 "${FILES[@]}" > "$OUT/all_scenes.jsonl"
 echo "合并 ${#FILES[@]} 个来源 -> $OUT/all_scenes.jsonl ($(wc -l < "$OUT/all_scenes.jsonl") 个 scene)"
 
 step "2. 事件派生"

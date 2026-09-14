@@ -99,6 +99,16 @@ def derive_density_cluster(scene: Scene, rule: dict[str, Any], cls_id: str,
                 scene.meta["hard_negative"] = True
                 scene.meta.setdefault("hard_negative_reason", []).append(
                     f"{cls_id}/{subtype or '-'}: {len(group)} 个目标密集成簇但不含军事目标")
+                # 把"像但不是"的那块区域记下来。困难负样本没有事件, 下游算不出区域框,
+                # 而这块区域正是它最有价值的部分 —— 描述题要讲清"密在哪、为什么不算",
+                # 定位题要能问"目标最密的一片在哪"(但绝不能问成"异常在哪")。
+                xs = [centers[i][0] for i in group]
+                ys = [centers[i][1] for i in group]
+                box = [min(xs), min(ys), max(xs), max(ys)]
+                prev = scene.meta.get("hard_negative_bbox")
+                if prev is None or (box[2] - box[0]) * (box[3] - box[1]) > \
+                        (prev[2] - prev[0]) * (prev[3] - prev[1]):
+                    scene.meta["hard_negative_bbox"] = box   # 取最大的那一簇
             continue
         xs = [centers[i][0] for i in group]
         ys = [centers[i][1] for i in group]

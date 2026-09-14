@@ -37,6 +37,7 @@ TEMPORAL_RATIO = 0.60           # 时序题。只有带轨迹的视频/多帧能
 # (有轨迹、有界线、有方向), 配比给到最高, 把一张图的信息榨干
 CROSS_DIR_RATIO = 0.75
 CROSS_COUNT_RATIO = 0.70
+DENSE_REGION_RATIO = 0.55       # 困难负样本的"密集区在哪"
 CROSS_NEG_RATIO = 0.35          # "有线但没人越线"的负样本。不给它, 模型会学成
                                 # "只要问到警戒线就答有越界"
 
@@ -279,6 +280,12 @@ class RuleBuilder:
         return q, a
 
     def locate_verbal(self, s: Scene) -> tuple[str, str] | None:
+        # **没有异常事件就不出定位题**。困难负样本确实有个真实的密集区(民用停车场、
+        # 民航机坪), _region_box 也拿得到框, 但画面已经被判为正常 —— 再答一句
+        # "异常位于画面右上", 就和上一轮的判定结论直接打架。
+        # 自相矛盾的样本比缺样本伤得多, 这一类的区域信息改走 dense_region。
+        if not s.anomaly_types:
+            return None
         rb = self._region_box(s)
         if rb is None:
             return None
@@ -288,6 +295,8 @@ class RuleBuilder:
         return q, position_text(box, s.width, s.height, gran, self.rng)
 
     def locate_box(self, s: Scene) -> tuple[str, str] | None:
+        if not s.anomaly_types:
+            return None
         rb = self._region_box(s)
         if rb is None:
             return None
@@ -297,6 +306,8 @@ class RuleBuilder:
 
     def locate_box_multi(self, s: Scene) -> tuple[str, str] | None:
         """越界类: 多个目标一起框出。"""
+        if not s.anomaly_types:
+            return None
         objs = self._crossed_objs(s)
         if not objs:
             return None
@@ -489,6 +500,25 @@ class RuleBuilder:
             return "依据是逐项排查的结果：目标分布稀疏、无烟火迹象、无跨界移动，各项均未触发。"
         return None
 
+    def dense_region(self, s: Scene) -> tuple[str, str] | None:
+        """困难负样本的"密集区在哪"。区域是真的, 只是它不构成异常 ——
+        问法与答案都不提"异常"二字, 才不会和判定结论冲突。"""
+        if s.anomaly_types or not s.meta.get("hard_negative"):
+            return None
+        box = s.meta.get("hard_negative_bbox") or (self._region_box(s) or [None])[0]
+        if not box:
+            return None
+        gran = self.rng.choices(["zone", "ratio"], weights=[60, 40])[0]
+        where = position_text(box, s.width, s.height, gran, self.rng)
+        by: dict[str, int] = {}
+        for o in s.objects:
+            by[o.cls] = by.get(o.cls, 0) + 1
+        cls, n = max(by.items(), key=lambda kv: kv[1]) if by else ("目标", 0)
+        what = f"{n}{MEASURE.get(cls, '个')}{CLS_ZH.get(cls, cls)}" if n else "若干目标"
+        return (self._ask("dense_region"),
+                f"{where}该区域聚集了 {what}，密度明显高于画面其他部分，"
+                f"但均为民用目标，不属于需要上报的情况。")
+
     # ---------------------------------------------- 越界专属题
     @staticmethod
     def _has_cross(s: Scene) -> bool:
@@ -640,6 +670,10 @@ class RuleBuilder:
         # 越界专属题。这一类的图最少, 但一张图能问的东西不止"有没有异常":
         # 方向、越了几个没越几个、界线怎么走, 答案全由轨迹和界线唯一决定,
         # 零成本零幻觉 —— 比在同一批画面上多生成几段描述划算得多。
+        # 困难负样本: 区域信息走"密集区在哪", 不走"异常在哪"
+        if r.random() < DENSE_REGION_RATIO and (t := self.dense_region(s)):
+            out.append(self._mk(s, [t], "dense_region"))
+
         for ratio, fn, name in ((CROSS_DIR_RATIO, self.cross_direction, "cross_direction"),
                                 (CROSS_COUNT_RATIO, self.cross_count, "cross_count"),
                                 (CROSS_NEG_RATIO, self.cross_negative, "cross_negative")):

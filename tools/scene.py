@@ -132,7 +132,20 @@ def load_scenes(path: str | Path) -> list[Scene]:
     if not text:
         return []
     if p.suffix == ".jsonl" or text[0] != "[":
-        return [Scene.from_dict(json.loads(ln)) for ln in text.splitlines() if ln.strip()]
+        out = []
+    for i, ln in enumerate(text.splitlines(), 1):
+        if not ln.strip():
+            continue
+        try:
+            out.append(Scene.from_dict(json.loads(ln)))
+        except json.JSONDecodeError as e:
+            # 指明是哪个文件的第几行。最常见的成因是合并时少了结尾换行,
+            # 两条记录粘成了一行 —— 不点名的话, 一个裸 JSONDecodeError 无从查起。
+            raise ValueError(
+                f"{p}: 第 {i} 行不是合法 JSON ({e})。"
+                f"若该行很长, 多半是合并 jsonl 时少了结尾换行, 两条记录粘在了一起"
+            ) from e
+    return out
     return [Scene.from_dict(d) for d in json.loads(text)]
 
 
