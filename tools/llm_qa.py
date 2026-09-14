@@ -35,6 +35,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ds.boxes import BBOX_SCALE, COORD_MODE, box_json, to_bbox2d  # noqa: E402
 from build_vqa import region_box_of, scene_quality  # noqa: E402  与规则侧共用一套口径
+from sharegpt import make_row  # noqa: E402
 from facets import Facet, load_all, load_tool
 from scene import Scene, load_scenes
 
@@ -733,7 +734,6 @@ def cmd_verify(args, onto):
         stat["pass"] += 1
         field = r.get("media_field", "images")
         paths = r.get("media") or [r["image_path"]]
-        tok = "<video>" if field == "videos" else "<image>"
         answer = r["answer"]
         if r.get("facet") == "grounded" and r.get("region"):
             # 文字是模型写的, 坐标是规则算的 —— 在这里才合成一条"文字 + 图像区域"的答案。
@@ -741,25 +741,23 @@ def cmd_verify(args, onto):
             n_grounded += 1
             answer = answer.rstrip() + "\n" + box_json(r["region"]["box_1000"],
                                                        r["region"]["label"])
-        out.append({
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": tok * len(paths) + r["question"]},
-                         {"role": "assistant", "content": answer}],
-            field: paths,
-            "extra": {"image_id": r["image_id"], "task": r["kind"], "facet": r["facet"],
-                      "gen": "llm", "n_turns": 1,
+        out.append(make_row(
+            sample_id=f"{r['image_id']}_{r['facet']}_{i}",
+            media_field=field, media=paths, system=system,
+            turns=[(r["question"], answer)],
+            metadata={"image_id": r["image_id"], "task_type": r["kind"], "facet": r["facet"],
+                      "gen": "llm",
                       "modality": r.get("modality", "image"), "n_media": len(paths),
                       "anomaly": [r["anomaly"]],
                       "source_dataset": r["source_dataset"], "license": r["license"],
                       "image_width": r["width"], "image_height": r["height"],
                       "coordinate_mode": COORD_MODE, "bbox_scale": BOX_SCALE,
-                      "review": v or "skipped"},
-        })
+                      "review": v or "skipped"}))
 
     base = Path(args.out)
     base.parent.mkdir(parents=True, exist_ok=True)
-    img = [s for s in out if "videos" not in s]
-    vid = [s for s in out if "videos" in s]
+    img = [x for x in out if "videos" not in x]
+    vid = [x for x in out if "videos" in x]
     base.write_text(json.dumps(img, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"落盘 {len(img)} 条(图像) -> {base}")
     if vid:
@@ -776,7 +774,7 @@ def cmd_verify(args, onto):
             print("  [warn] 打回率超过 15%, 说明生成端在编造或跑题, "
                   "建议收紧 answer-spec 或把 temperature 降到 0.5 以下")
     from collections import Counter
-    print("  侧面分布:", dict(Counter(s["extra"]["facet"] for s in out).most_common()))
+    print("  侧面分布:", dict(Counter(x["metadata"]["facet"] for x in out).most_common()))
     if n_grounded:
         print(f"  其中带框描述(文字+图像区域) {n_grounded} 条, 坐标由规则给出")
 

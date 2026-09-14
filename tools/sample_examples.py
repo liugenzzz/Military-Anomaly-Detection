@@ -30,12 +30,12 @@ def main() -> None:
             if isinstance(data, list):
                 rows += data
 
-    # 分组键: 规则题按 task, 描述题按 facet —— describe 这一个 task 底下有二十多个
-    # 侧面, 只按 task 抽的话它们全被折叠成一条, 恰恰是最该逐个过目的部分
+    # 分组键: 规则题按 task_type, 描述题按 facet —— describe 这一个 task 底下有
+    # 二十多个侧面, 只按 task 抽的话它们全被折叠成一条, 恰恰是最该逐个过目的部分
     groups: dict[str, list[dict]] = {}
     for r in rows:
-        ex = r.get("extra", {})
-        key = ex.get("facet") if ex.get("gen") == "llm" else ex.get("task", "?")
+        ex = r.get("metadata") or r.get("extra") or {}
+        key = ex.get("facet") if ex.get("gen") == "llm" else ex.get("task_type", ex.get("task", "?"))
         groups.setdefault(str(key), []).append(r)
 
     rng = random.Random(args.seed)
@@ -43,20 +43,9 @@ def main() -> None:
     for key in sorted(groups):
         pool = groups[key][:]
         rng.shuffle(pool)
-        for r in pool[:args.per_kind]:
-            ex = r.get("extra", {})
-            field = "videos" if "videos" in r else "images"
-            out.append({
-                "题型": key,
-                "生成方式": {"rule": "规则(标注唯一决定)", "llm": "LLM(FACTS 约束)",
-                            "rule+llm": "规则+LLM 多轮链"}.get(ex.get("gen"), ex.get("gen")),
-                "异常类": ex.get("anomaly"),
-                "轮数": ex.get("n_turns"), "输入形态": ex.get("modality"),
-                "媒体数": ex.get("n_media"), "来源": ex.get("source_dataset"),
-                "对话": [{"角色": m["role"], "内容": m["content"]}
-                        for m in r["messages"] if m["role"] != "system"],
-                field: r.get(field, []),
-            })
+        # **原样导出训练文件里的那一行**, 不做任何改写 —— 验收看的就得是真格式,
+        # 翻译成中文键看着舒服, 但看不出 conversations / from / value 对不对
+        out += pool[:args.per_kind]
 
     p = Path(args.out)
     p.parent.mkdir(parents=True, exist_ok=True)

@@ -79,7 +79,7 @@ def main() -> None:
             if not isinstance(data, list):
                 continue
             for row in data:
-                src_ds = (row.get("extra") or {}).get("source_dataset", "misc")
+                src_ds = (row.get("metadata") or row.get("extra") or {}).get("source_dataset", "misc")
                 for field in MEDIA_KEYS:
                     if field not in row:
                         continue

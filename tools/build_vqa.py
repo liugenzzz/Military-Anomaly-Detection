@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ds.boxes import BBOX_SCALE, COORD_MODE, box_json, boxes_json, to_bbox2d  # noqa: E402
 from derive_events import _side  # noqa: E402  越界方向判定, 与派生端共用一份实现
 from facets import load_all, load_tool  # noqa: E402
+from sharegpt import make_row, meta_of  # noqa: E402
 from scene import Obj, Scene, load_scenes  # noqa: E402
 
 # 任务配额(占该异常类总量)。描述与推理由 llm_qa 产出, 这里只列规则侧。
@@ -29,6 +30,7 @@ NEGATION_RATIO = 0.20           # 每类任务的否定变体占比
 TWO_TURN_RATIO = 0.30           # 规则侧的多轮占比
 THREE_TURN_RATIO = 0.35         # 多轮里再有三成半追到第三轮("依据是什么")
 COUNT_BOX_RATIO = 0.25          # 计数题里四分之一要求逐个框出
+COUNT_THEN_JUDGE_RATIO = 0.55   # 计数/覆盖题里过半要追问一句"那这算正常吗"          # 计数题里四分之一要求逐个框出
 COMPOSE_RATIO = 0.30            # 目标构成(哪几类各多少)
 COMPARE_RATIO = 0.25            # 左右/上下密度对比
 CORRECT_RATIO = 0.30            # 纠错题(给错误陈述让模型推翻)
@@ -40,6 +42,11 @@ CROSS_COUNT_RATIO = 0.70
 DENSE_REGION_RATIO = 0.55       # 困难负样本的"密集区在哪"
 CROSS_NEG_RATIO = 0.35          # "有线但没人越线"的负样本。不给它, 模型会学成
                                 # "只要问到警戒线就答有越界"
+
+# 不可数的"东西": 烟和火是连续的一团, 没有"几个"可言。
+# "清点一下画面中的烟雾"、"共 2 个目标: 火焰 1 个; 烟雾 1 个" —— 这种问法本身就不成立,
+# 标注里的一个框只是标出了它的范围, 不代表"一个烟雾"。这类目标改问覆盖范围。
+UNCOUNTABLE = {"fire", "smoke", "flame", "dust"}
 
 MEASURE = {"military-plane": "架", "civil-plane": "架", "plane": "架",
            "military-helicopter": "架", "civil-helicopter": "架", "helicopter": "架",
@@ -74,6 +81,19 @@ def _frac(v: float) -> str:
     if abs(v - 0.75) < 0.04:
         return "四分之三处"
     return _TENTH[max(1, min(9, round(v * 10)))]
+
+
+def _area_zh(v: float) -> str:
+    """面积占比 -> 中文。**别拿 _frac 代替它** —— 那个是方位格式化器,
+    返回的是"近左缘""三分之一处"这类位置说法, 套到面积上会写出
+    "约占画幅的近左缘"这种句子。"""
+    if v < 0.02:
+        return "占画幅不到百分之二"
+    if v < 0.06:
+        return "约占画幅百分之五"
+    if v >= 0.9:
+        return "几乎覆盖整个画面"
+    return f"约占画幅{_TENTH[max(1, min(9, round(v * 10)))]}"
 
 
 def _zone(cx: float, cy: float) -> str:
@@ -177,6 +197,7 @@ class RuleBuilder:
         _, self.asks = load_all(prompt_dir)
         self.system = (Path(prompt_dir) / "system.txt").read_text(encoding="utf-8").strip()
         self.rng = random.Random(seed)
+        self._n = 0
 
     # -------------------------------------------------- 小工具
     def _ask(self, task: str, **kw) -> str:
@@ -198,33 +219,26 @@ class RuleBuilder:
         return crossed_objs(s)
 
     def _mk(self, s: Scene, turns: list[tuple[str, str]], task: str, **extra) -> dict:
-        msgs: list[dict] = [{"role": "system", "content": self.system}]
         field, paths = s.media
-        tok = "<video>" if field == "videos" else "<image>"
         # 越界类的问题必须自带警戒线前提 —— 线是虚拟的, 不写进问题, 模型无从判断。
         # 但只挂在真的与线有关的题上: 判定题答的是集结, 前面顶一句警戒线纯属噪声,
         # 还会让模型以为"凡是提到线的场合答案就该跟越界有关"。
         about_line = task.startswith("cross_") or (
             task.startswith(("judge", "locate")) and self._has_cross(s))
-        pre = self.boundary_premise(s) if about_line else ""
-        for i, (q, a) in enumerate(turns):
-            if i == 0 and pre:
-                q = pre + q
-            msgs.append({"role": "user",
-                         "content": (tok * len(paths) + q) if i == 0 else q})
-            msgs.append({"role": "assistant", "content": a})
-        return {
-            "messages": msgs,
-            field: paths,
-            "extra": {"image_id": s.image_id, "task": task, "gen": "rule",
-                      "n_turns": len(turns), "modality": s.modality,
-                      "n_media": len(paths),
+        if about_line and (pre := self.boundary_premise(s)):
+            turns = [(pre + turns[0][0], turns[0][1])] + list(turns[1:])
+        self._n += 1
+        return make_row(
+            sample_id=f"{s.image_id}_{task}_{self._n}",
+            media_field=field, media=paths, system=self.system, turns=turns,
+            metadata={"image_id": s.image_id, "task_type": task, "gen": "rule",
+                      "modality": s.modality, "n_media": len(paths),
                       "anomaly": s.anomaly_types or ["normal"],
                       "hard_negative": bool(s.meta.get("hard_negative")),
                       "source_dataset": s.source_dataset, "license": s.license,
                       "view": s.view, "image_width": s.width, "image_height": s.height,
                       "coordinate_mode": COORD_MODE, "bbox_scale": BBOX_SCALE, **extra},
-        }
+        )
 
     # -------------------------------------------------- 四类任务
     def judge(self, s: Scene) -> tuple[str, str]:
@@ -317,6 +331,8 @@ class RuleBuilder:
     def count(self, s: Scene) -> tuple[str, str] | None:
         by: dict[str, int] = {}
         for o in s.objects:
+            if o.cls in UNCOUNTABLE:
+                continue                      # 烟雾/火焰没有"几个", 见 UNCOUNTABLE
             by[o.cls] = by.get(o.cls, 0) + 1
         if not by:
             return None
@@ -348,10 +364,34 @@ class RuleBuilder:
 
     # -------------------------------------------------- 扩充题型
     def _class_counts(self, s: Scene) -> list[tuple[str, int]]:
+        """只统计**可数**目标。烟火不计数, 它们的信息走 coverage 题。"""
         by: dict[str, int] = {}
         for o in s.objects:
+            if o.cls in UNCOUNTABLE:
+                continue
             by[o.cls] = by.get(o.cls, 0) + 1
         return sorted(by.items(), key=lambda kv: -kv[1])
+
+    def coverage(self, s: Scene) -> tuple[str, str] | None:
+        """烟火这类不可数目标改问**覆盖范围**。面积由标注框算得出来, 仍是唯一答案。"""
+        # 和定位题同一条闸: 没有异常事件就别问烟火 —— 问完范围紧接着一句
+        # "未见异常", 又是自相矛盾。烟火在本体里本来就是异常类, 有烟火却无事件
+        # 说明标注没跟上, 这种图不出题。
+        if not s.anomaly_types:
+            return None
+        cands = [o for o in s.objects if o.cls in UNCOUNTABLE]
+        if not cands:
+            return None
+        o = max(cands, key=lambda x: x.area)
+        zh = CLS_ZH.get(o.cls, o.cls)
+        ratio = o.area / max(1.0, float(s.width * s.height))
+        x1, y1, x2, y2 = o.bbox
+        where = _zone((x1 + x2) / 2 / max(1, s.width), (y1 + y2) / 2 / max(1, s.height))
+        lead = ("范围很小，" if ratio < 0.06 else
+                "范围较大，" if ratio >= 0.12 else "")
+        scale = lead + _area_zh(ratio)
+        return (self._ask("coverage", zh=zh),
+                f"{zh}集中在{where}，{scale}。")
 
     def _phrase(self, cls: str, n: int) -> str:
         return f"{CLS_ZH.get(cls, cls)} {n} {MEASURE.get(cls, '个')}"
@@ -433,7 +473,7 @@ class RuleBuilder:
         if not cc:
             return None
         cls, n = cc[0]
-        if n > 12:
+        if n > 12 or cls in UNCOUNTABLE:
             return None
         objs = [o for o in s.objects if o.cls == cls]
         mw, zh = MEASURE.get(cls, "个"), CLS_ZH.get(cls, cls)
@@ -657,7 +697,22 @@ class RuleBuilder:
         if r.random() < COUNT_BOX_RATIO and (t := self.count_box(s)):
             out.append(self._mk(s, [t], "count_box"))
         elif (t := self.count(s)):
-            out.append(self._mk(s, [t], "count"))
+            # **数完要接着问异常**。"清点一下画面中的车辆" -> "12 辆" 然后就断了,
+            # 这种题只教模型数数, 教不会它"数出来之后说明什么"。实际用起来,
+            # 清点是判定的铺垫: 先数清楚, 再据此回答这批目标的分布正不正常。
+            if r.random() < COUNT_THEN_JUDGE_RATIO:
+                out.append(self._mk(s, [t, (self._ask("after_count"), ja)],
+                                    "count+judge", form="multi_turn"))
+            else:
+                out.append(self._mk(s, [t], "count"))
+
+        # 烟火不可数, 改问覆盖范围; 同样接一轮判定
+        if (t := self.coverage(s)):
+            if r.random() < COUNT_THEN_JUDGE_RATIO:
+                out.append(self._mk(s, [t, (self._ask("after_count"), ja)],
+                                    "coverage+judge", form="multi_turn"))
+            else:
+                out.append(self._mk(s, [t], "coverage"))
 
         # 构成 / 对比 / 纠错 / 时序 —— 各按配比抽, 抽不到条件就跳过, 不硬凑
         for ratio, fn, name in ((COMPOSE_RATIO, self.compose, "compose"),
@@ -740,11 +795,11 @@ def apply_quota(samples: list[dict], target: int, seed: int = 0,
     # 每一条都是 explosion —— 按假类名配额, 既把缺口报错, 也会把该留的样本丢掉。
     total: dict[str, int] = {}
     for s in samples:
-        for c in s["extra"]["anomaly"]:
+        for c in meta_of(s)["anomaly"]:
             total[c] = total.get(c, 0) + 1
     by_cls: dict[str, list[dict]] = {}
     for s in samples:
-        cls = min(s["extra"]["anomaly"], key=lambda c: (total.get(c, 0), c))
+        cls = min(meta_of(s)["anomaly"], key=lambda c: (total.get(c, 0), c))
         by_cls.setdefault(cls, []).append(s)
 
     rng = random.Random(seed)
@@ -759,11 +814,11 @@ def apply_quota(samples: list[dict], target: int, seed: int = 0,
 
         by_img: dict[str, list[dict]] = {}
         for s in group:
-            by_img.setdefault(s["extra"]["image_id"], []).append(s)
+            by_img.setdefault(meta_of(s)["image_id"], []).append(s)
         # 数据源 -> 该源的图, 按质量分从高到低
         by_src: dict[str, list[str]] = {}
         for img, rows in by_img.items():
-            by_src.setdefault(rows[0]["extra"].get("source_dataset", "?"), []).append(img)
+            by_src.setdefault(meta_of(rows[0]).get("source_dataset", "?"), []).append(img)
         for src in by_src:
             by_src[src].sort(key=lambda k: (-quality.get(k, 0.5), k))
 
@@ -787,7 +842,7 @@ def apply_quota(samples: list[dict], target: int, seed: int = 0,
     # 最终每个异常类实际覆盖多少条(同时属于多类的样本, 每一类都算它一次)
     final: dict[str, int] = {}
     for s in out:
-        for c in s["extra"]["anomaly"]:
+        for c in meta_of(s)["anomaly"]:
             final[c] = final.get(c, 0) + 1
 
     print("\n按类别配额(规则侧)。归属列 = 归到本类名下的条数, 覆盖列 = 含本类的全部条数:")
@@ -804,7 +859,7 @@ def apply_quota(samples: list[dict], target: int, seed: int = 0,
         else:
             note = "✅"
         print(f"  {cls:20s} 归属 {after:7d}  覆盖 {cov:7d} / 目标 {tgt:6d}  {note}")
-    multi = sum(1 for s in out if len(s["extra"]["anomaly"]) > 1)
+    multi = sum(1 for s in out if len(meta_of(s)["anomaly"]) > 1)
     if multi:
         print(f"  其中 {multi} 条同时属于多个异常类(如烟雾与爆炸同框), "
               f"已归到最稀缺的那一类, 覆盖列里两类都计入")
@@ -827,7 +882,7 @@ def split_by_group(samples: list[dict], ratios=(0.8, 0.1, 0.1), seed: int = 0):
     """按来源图/视频分组切分, 避免同源相邻帧跨集造成指标虚高。"""
     groups: dict[str, list[dict]] = {}
     for s in samples:
-        gid = s["extra"]["image_id"].rsplit("_frame", 1)[0]
+        gid = meta_of(s)["image_id"].rsplit("_frame", 1)[0]
         groups.setdefault(gid, []).append(s)
     keys = sorted(groups)
     random.Random(seed).shuffle(keys)
@@ -887,10 +942,10 @@ def main() -> None:
             _write(name, part)
 
     from collections import Counter
-    tasks = Counter(s["extra"]["task"] for s in samples)
-    turns = Counter(s["extra"]["n_turns"] for s in samples)
-    mods = Counter(s["extra"]["modality"] for s in samples)
-    n_norm = sum(1 for s in samples if s["extra"]["anomaly"] == ["normal"])
+    tasks = Counter(meta_of(s)["task_type"] for s in samples)
+    turns = Counter(meta_of(s)["n_turns"] for s in samples)
+    mods = Counter(meta_of(s)["modality"] for s in samples)
+    n_norm = sum(1 for s in samples if meta_of(s)["anomaly"] == ["normal"])
     print(f"\n共 {len(samples)} 条 / {len(scenes)} 个 scene")
     print(f"正常样本占比 {n_norm / max(1, len(samples)):.1%}"
           f"（目标 ≥{onto.get('negative_ratio_target', 0.3):.0%}）")

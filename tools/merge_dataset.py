@@ -14,7 +14,11 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sharegpt import HUMAN, meta_of  # noqa: E402
 
 SPLITS = ("train", "val", "test")
 
@@ -48,17 +52,17 @@ def compose_chains(rows: list[dict], ratio: float, seed: int = 0) -> list[dict]:
     rng = random.Random(seed)
     by_img: dict[str, list[dict]] = {}
     for r in rows:
-        by_img.setdefault((r.get("extra") or {}).get("image_id", ""), []).append(r)
+        by_img.setdefault(meta_of(r).get("image_id", ""), []).append(r)
 
     out, n_chain = [], 0
     for img, group in by_img.items():
         def pick(pred):
             return next((x for x in group
-                         if (x.get("extra") or {}).get("n_turns", 1) == 1 and pred(x.get("extra") or {})), None)
+                         if meta_of(x).get("n_turns", 1) == 1 and pred(meta_of(x))), None)
 
-        judge = pick(lambda e: e.get("gen") == "rule" and e.get("task") == "judge")
+        judge = pick(lambda e: e.get("gen") == "rule" and e.get("task_type") == "judge")
         desc = pick(lambda e: e.get("facet") == "grounded")
-        why = pick(lambda e: e.get("task") == "reason")
+        why = pick(lambda e: e.get("task_type") == "reason")
         parts = [x for x in (judge, desc, why) if x is not None]
         if len(parts) < 2 or not img or rng.random() >= ratio:
             out.extend(group)
@@ -66,21 +70,24 @@ def compose_chains(rows: list[dict], ratio: float, seed: int = 0) -> list[dict]:
 
         base = parts[0]
         field = "videos" if "videos" in base else "images"
-        msgs = list(base["messages"][:3])                    # system + 第一问 + 第一答
+        conv = list(base["conversations"][:2])               # 第一问 + 第一答
         for x in parts[1:]:
-            q = _strip_tok(x["messages"][-2]["content"])
-            msgs.append({"role": "user", "content": q})
-            msgs.append(dict(x["messages"][-1]))
+            conv.append({"from": HUMAN, "value": _strip_tok(x["conversations"][-2]["value"])})
+            conv.append(dict(x["conversations"][-1]))
+        bm = meta_of(base)
         merged = {
-            "messages": msgs, field: base[field],
-            "extra": {**base["extra"],
-                      "task": "+".join(
-                          [(x["extra"].get("facet") if x["extra"].get("gen") == "llm"
-                            else x["extra"].get("task")) for x in parts]),
-                      "gen": "rule+llm" if len({x["extra"].get("gen") for x in parts}) > 1
-                             else base["extra"].get("gen"),
-                      "n_turns": len(parts), "form": "chain"},
+            "id": f"{bm.get('image_id', 'chain')}_chain_{n_chain}",
+            field: base[field], "conversations": conv,
+            "metadata": {**bm,
+                         "task_type": "+".join(
+                             [(meta_of(x).get("facet") if meta_of(x).get("gen") == "llm"
+                               else meta_of(x).get("task_type")) for x in parts]),
+                         "gen": "rule+llm" if len({meta_of(x).get("gen") for x in parts}) > 1
+                                else bm.get("gen"),
+                         "n_turns": len(parts), "form": "chain"},
         }
+        if base.get("system"):
+            merged["system"] = base["system"]
         out.append(merged)
         out.extend(x for x in group if x not in parts)       # 被拼进去的不再单独出现
         n_chain += 1
@@ -114,14 +121,14 @@ def main() -> None:
             for suffix in ("", "_video"):
                 for row in _load(d / f"{sp}{suffix}.json"):
                     buckets[sp].append(row)
-                    where.setdefault((row.get("extra") or {}).get("image_id", ""), sp)
+                    where.setdefault(meta_of(row).get("image_id", ""), sp)
         for suffix in ("", "_video"):
             loose += _load(d / f"all{suffix}.json")
 
     r = [float(x) for x in args.ratios.split(",")]
     n_assigned = 0
     for i, row in enumerate(loose):
-        img = (row.get("extra") or {}).get("image_id", "")
+        img = meta_of(row).get("image_id", "")
         sp = where.get(img)
         if sp is None:                          # 规则侧没见过这张图, 按比例落位
             sp = SPLITS[0] if (i % 10) < r[0] * 10 else (
@@ -136,8 +143,9 @@ def main() -> None:
             buckets[sp] = compose_chains(buckets[sp], args.chain_ratio, args.seed)
 
     info: dict[str, dict] = {}
-    tags = {"role_tag": "role", "content_tag": "content", "user_tag": "user",
-            "assistant_tag": "assistant", "system_tag": "system"}
+    # 与 qwen3vl_sft_builder 同一套: conversations + from/value + human/gpt
+    tags = {"role_tag": "from", "content_tag": "value", "user_tag": "human",
+            "assistant_tag": "gpt"}
     for sp in SPLITS:
         for suffix, field, sel in (("", "images", lambda x: "videos" not in x),
                                    ("_video", "videos", lambda x: "videos" in x)):
@@ -149,7 +157,8 @@ def main() -> None:
                                   encoding="utf-8")
             key = f"{args.name}{'_video' if suffix else ''}" + ("" if sp == "train" else f"_{sp}")
             info[key] = {"file_name": fn, "formatting": "sharegpt",
-                         "columns": {"messages": "messages", field: field},
+                         "columns": {"messages": "conversations", field: field,
+                                     "system": "system"},
                          "tags": tags}
             print(f"  {fn:20s} {len(part):7d} 条   -> dataset_info 条目 {key}")
 

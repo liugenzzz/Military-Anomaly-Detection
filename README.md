@@ -141,7 +141,8 @@ LLM 调用单条失败不中断整批：失败的记 `error` 字段、答案留�
 | `judge` | 有没有异常、是哪类 | 所有图，每张必出 |
 | `locate_verbal` | 异常在画面什么方位（**不给坐标**） | 有区域信息的图，占定位题七成 |
 | `locate_box` | 框出异常区域 | 同上，占三成 |
-| `count` | 某类目标有几个 | 有检测框的图 |
+| `count` | 某类目标有几个 | 有检测框的图。**烟火不计数**，改出 `coverage` |
+| `coverage` | 烟/火覆盖了多大范围 | 有烟火标注且确为异常的图 |
 | `count_box` | 计数**并逐个框出** | 目标数 ≤12 的图 |
 | `compose` | 画面里有哪几类目标、各多少 | 含 ≥2 类目标的图 |
 | `compare` | 左右/上下哪边更密集 | 目标数 ≥4 的图 |
@@ -149,7 +150,19 @@ LLM 调用单条失败不中断整批：失败的记 `error` 字段、答案留�
 | `temporal` | 异常出现在序列的哪个阶段 | 带轨迹的视频/多帧 |
 | `negation` | 问画面里**没有**的东西 | 所有图 |
 | `judge+locate(+why)` | 两轮 / 三轮追问 | 多轮占三成，其中三成半追到第三轮 |
+| `count+judge` / `coverage+judge` | 先数清楚/看清范围，再据此判定 | 计数类过半接这一轮 |
+| `dense_region` | 目标最密的一片在哪（**不提"异常"二字**） | 困难负样本专用 |
 | `judge+grounded+reason` | 判定→带框描述→异常说明的完整链 | 合并阶段按 `CHAIN_RATIO` 拼 |
+
+**三条不能破的规矩**（都是验收时踩出来的）：
+
+1. **正常图不出"异常在哪"的题**。困难负样本确实有真实的密集区，但判定已经说了"未见异常"，
+   再答一句"异常位于画面右上"就是自相矛盾——这种样本比缺样本伤得多。区域信息改走
+   `dense_region`，问法与答案都不出现"异常"二字。
+2. **烟火不计数**。"清点一下画面中的烟雾"这个问法本身不成立——标注里的一个框标的是范围，
+   不是"一个烟雾"。改问覆盖比例（面积算得出来，仍是唯一答案）。
+3. **清点不是终点**。"画面里有几辆车" → "12 辆" 然后就断了，这种题只教模型数数。
+   过半的计数题接一轮"那这样的分布正常吗"，把清点变成判定的铺垫。
 
 `correct` 那三成真陈述不能省：全给假的，模型会学成「凡是被问就否定」，换个正确说法它照样推翻，
 这比一味附和还糟。`temporal` 只答轨迹能证明的事——静态图问「什么时候开始的」，只能靠编。
@@ -202,6 +215,23 @@ LLM 调用单条失败不中断整批：失败的记 `error` 字段、答案留�
 | `image` 单图 | MAR20 / Mendeley / FASDD / DOTA / VisDrone-DET 等静态数据集 | `images` |
 | `video` 整段视频 | **ERA 的 5 秒片段**（人群运动、火焰跳动只有视频看得到，抽成静帧就丢了） | `videos` |
 | `multi_image` 多帧序列 | 越界移动（需要逐帧对位判断跨越时机） | `images` |
+
+落盘格式与 [`qwen3vl_sft_builder`](https://github.com/liugenzzz/target_detection_vl_dataset)
+对齐——**经典 ShareGPT**，不是 `messages`/`role` 那个变体：
+
+```json
+{"id": "MAR20_0012_judge+locate_7",
+ "images": ["/mnt/.../corpus_media/military_anomaly/images/MAR20/0012.jpg"],
+ "system": "你是航拍与监控图像的情报标注专家……",
+ "conversations": [{"from": "human", "value": "<image>\n看看这张图有没有问题。"},
+                   {"from": "gpt",   "value": "有异常。类型为异常聚集……"}],
+ "metadata": {"task_type": "judge+locate", "n_turns": 2, "anomaly": ["massing"], ...}}
+```
+
+`conversations`/`from`/`value`/`human`/`gpt`、占位符带换行（`<image>\n`）、`metadata` 而非
+`extra`——两个项目的数据将来大概率要混着训，格式不一致会踩坑。`system` 单列一个字段
+（那个项目没有 system，我们需要它框定"情报标注"的角色），在 `dataset_info.json` 里映射到
+`columns.system`。
 
 图像样本与视频样本**分文件落盘**（`train.json` / `train_video.json`），因为在 LLaMA-Factory
 里它们是两个数据集条目，`columns` 分别映射 `images` 与 `videos`，混在一个文件里会加载失败。

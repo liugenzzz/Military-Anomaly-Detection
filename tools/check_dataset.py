@@ -9,6 +9,10 @@ import json
 import re
 from collections import Counter
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sharegpt import GPT, HUMAN, meta_of, turns_of  # noqa: E402
 
 BOX_RE = re.compile(r"\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]")
 
@@ -33,12 +37,11 @@ def main() -> None:
         data = json.loads(Path(fp).read_text(encoding="utf-8"))
         for i, s in enumerate(data):
             total += 1
-            msgs = s.get("messages", [])
-            body = [m for m in msgs if m.get("role") != "system"]
+            body = turns_of(s)
             if len(body) < 2 or len(body) % 2 or any(
-                    m["role"] != ("user" if k % 2 == 0 else "assistant")
+                    m["role"] != (HUMAN if k % 2 == 0 else GPT)
                     for k, m in enumerate(body)):
-                problems.append(f"{fp}#{i}: messages 必须是 system? + user/assistant 交替")
+                problems.append(f"{fp}#{i}: conversations 必须是 human/gpt 交替")
                 continue
             turns[(len(body) // 2)] += 1
             field = "videos" if "videos" in s else "images"
@@ -71,8 +74,8 @@ def main() -> None:
                 for im in s.get(field, []):
                     if not Path(im).exists():
                         missing.add(im)
-            ex = s.get("extra", {})
-            qa_types[ex.get("task", ex.get("qa_type", "?"))] += 1
+            ex = meta_of(s)
+            qa_types[ex.get("task_type", ex.get("task", "?"))] += 1
             if ex.get("facet"):
                 facets[ex["facet"]] += 1
             gens[ex.get("gen", "-")] += 1
