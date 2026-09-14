@@ -23,8 +23,10 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -163,7 +165,7 @@ def build_facts(scene: Scene, onto: dict[str, Any], max_objects: int = 30) -> di
 
 
 # ---------------------------------------------------------------- LLM 客户端
-DEFAULT_MODEL = "Qwen3.6-27B"        # 与 target_detection_vl_dataset 项目同一套服务
+DEFAULT_MODEL = "Qwen3.8-27B"        # 与自建推理池同一套服务
 
 
 def _norm_base(u: str) -> str:
@@ -176,23 +178,68 @@ def _norm_base(u: str) -> str:
     return u
 
 
-class LLM:
-    """OpenAI 兼容接口。base_url 指向本地 vLLM 即可, 无需外网。
+@dataclass
+class Endpoint:
+    url: str
+    model: str
+    key: str = ""
+    concurrency: int = 4
+    name: str = ""
 
-    base_url 可以用逗号分隔写多个地址: 请求按轮转分发, 某一路连不上就摘掉它,
-    其余照跑。算力是多台机器的时候, 这比串行排队快得多。
+    def __post_init__(self):
+        self.url = _norm_base(self.url)
+        self.name = self.name or self.url
+
+
+def load_endpoints(path: str | None, role: str, model: str,
+                   base_url: str | None) -> list[Endpoint]:
+    """端点池。优先读 yaml 配置, 否则退回单地址(逗号分隔也认)。
+
+    配置按角色分组: generate 与 review 各用各的池子。**审稿必须换模型** ——
+    同一个模型审自己写的答案基本全过, 六维就是摆设。配置文件里 review 那一组
+    留空时会退回 generate 的池子, 并在跑的时候提醒。
+    """
+    if path:
+        cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        group = cfg.get(role) or cfg.get("generate") or []
+        if group:
+            out = []
+            for e in group:
+                if e.get("enabled") is False:
+                    continue                      # 暂停的那几路直接跳过, 不用删配置
+                out.append(Endpoint(url=e["url"], model=e.get("model", model),
+                                    key=str(e.get("key", "")),
+                                    concurrency=int(e.get("concurrency", 4)),
+                                    name=e.get("name", "")))
+            if out:
+                return out
+    raw = (base_url or os.environ.get("VLM_BASE_URL")
+           or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1")
+    key = os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+    return [Endpoint(url=u, model=model, key=key) for u in raw.split(",") if u.strip()]
+
+
+class LLM:
+    """OpenAI 兼容接口, 支持多端点池。
+
+    每一路各带自己的 model 和 key —— 局域网那十几路共用一个 local-pool-key,
+    云端那几路各有各的 sk, 一个全局 key 配不下来。
+    请求按各路的 concurrency 加权轮转; 某一路连不上就摘掉, 其余照跑。
     """
 
     def __init__(self, model: str, base_url: str | None = None,
                  api_key_env: str = "VLM_API_KEY", cache_dir: str | None = None,
-                 temperature: float = 0.7, max_retries: int = 3):
+                 temperature: float = 0.7, max_retries: int = 3,
+                 endpoints_file: str | None = None, role: str = "generate"):
+        self.pool = load_endpoints(endpoints_file, role, model, base_url)
+        # 按 concurrency 加权: 能扛 8 并发的那路就该多分到一倍的请求
+        self.ring: list[Endpoint] = []
+        for e in self.pool:
+            self.ring += [e] * max(1, e.concurrency)
         self.model = model
-        raw = (base_url or os.environ.get("VLM_BASE_URL")
-               or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1")
-        self.endpoints = [_norm_base(u) for u in raw.split(",") if u.strip()]
         self.dead: set[str] = set()
         self._rr = 0
-        self.api_key = os.environ.get(api_key_env) or os.environ.get("OPENAI_API_KEY", "")
+        self._lock = threading.Lock()
         self.temperature = temperature
         self.max_retries = max_retries
         self.cache = Path(cache_dir) if cache_dir else None
@@ -200,10 +247,19 @@ class LLM:
             self.cache.mkdir(parents=True, exist_ok=True)
 
     @property
-    def base_url(self) -> str:
-        alive = [u for u in self.endpoints if u not in self.dead] or self.endpoints
-        self._rr = (self._rr + 1) % len(alive)
-        return alive[self._rr]
+    def total_concurrency(self) -> int:
+        return sum(e.concurrency for e in self.pool)
+
+    def describe(self) -> str:
+        models = sorted({e.model for e in self.pool})
+        return (f"{len(self.pool)} 路端点 / 总并发 {self.total_concurrency} / "
+                f"模型 {'、'.join(models)}")
+
+    def pick(self) -> Endpoint:
+        with self._lock:
+            alive = [e for e in self.ring if e.url not in self.dead] or self.ring
+            self._rr = (self._rr + 1) % len(alive)
+            return alive[self._rr]
 
     def _key(self, payload: dict) -> str:
         return hashlib.sha256(json.dumps(payload, sort_keys=True,
@@ -217,19 +273,22 @@ class LLM:
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
+        payload.setdefault("model", self.model)
         cache_file = self.cache / f"{self._key(payload)}.json" if self.cache else None
         if cache_file and cache_file.exists():
             return json.loads(cache_file.read_text(encoding="utf-8"))["content"]
 
         last = None
         for attempt in range(self.max_retries):
-            url = self.base_url
+            ep = self.pick()
+            url = ep.url
+            payload["model"] = ep.model          # 每路的模型名可能不同
             try:
                 req = urllib.request.Request(
                     f"{url}/chat/completions",
                     data=json.dumps(payload).encode("utf-8"),
                     headers={"Content-Type": "application/json",
-                             "Authorization": f"Bearer {self.api_key}"})
+                             "Authorization": f"Bearer {ep.key}"})
                 with urllib.request.urlopen(req, timeout=180) as r:
                     content = json.loads(r.read())["choices"][0]["message"]["content"]
                 if cache_file:
@@ -238,7 +297,7 @@ class LLM:
                 return content
             except Exception as e:                       # noqa: BLE001
                 last = e
-                if isinstance(e, OSError) and len(self.endpoints) > 1:
+                if isinstance(e, OSError) and len(self.pool) > 1:
                     self.dead.add(url)       # 连不上的那一路摘掉, 别再往里发
                 time.sleep(2 ** attempt)
         raise RuntimeError(f"LLM 调用失败({url}): {last}")
@@ -565,7 +624,15 @@ def cmd_generate(args, onto):
         _write_requests(reqs, args.out)
         return
 
-    llm = LLM(args.model, args.base_url, cache_dir=args.cache_dir, temperature=args.temperature)
+    llm = LLM(args.model, args.base_url, cache_dir=args.cache_dir, temperature=args.temperature,
+              endpoints_file=args.endpoints, role="generate")
+    print(f"生成端: {llm.describe()}")
+    if args.workers <= 0:
+        args.workers = llm.total_concurrency     # 0 = 跟着池子的总并发走, 不用手算
+        print(f"  并发跟随池子: {args.workers}")
+    elif args.workers < llm.total_concurrency:
+        print(f"  [提示] --workers {args.workers} 小于池子总并发 {llm.total_concurrency}, "
+              f"这些机器没吃满; 填 0 让它自动跟随")
 
     def run(r):
         msg = [{"role": "user", "content": image_message(r["prompt"], r["image_path"], args.inline_images)}]
@@ -618,7 +685,17 @@ def cmd_verify(args, onto):
     # ── 闸二: 六维 review(按图分组, 一次审多条)
     verdicts: dict[int, dict] = {}
     if not args.no_verify and kept:
-        llm = LLM(args.model, args.base_url, cache_dir=args.cache_dir, temperature=0.0)
+        llm = LLM(args.model, args.base_url, cache_dir=args.cache_dir, temperature=0.0,
+                  endpoints_file=args.endpoints, role="review")
+        print(f"审稿端: {llm.describe()}")
+        if args.workers <= 0:
+            args.workers = llm.total_concurrency
+        gen_models = {e.model for e in LLM(args.model, args.base_url,
+                                           endpoints_file=args.endpoints,
+                                           role="generate").pool}
+        if {e.model for e in llm.pool} == gen_models:
+            print("  [注意] 审稿与生成是同一个模型, 自己审自己会虚高 —— "
+                  "配置里给 review 换一个模型")
         by_img: dict[str, list[int]] = {}
         for i, r in enumerate(kept):
             by_img.setdefault(r["image_id"], []).append(i)
@@ -753,8 +830,12 @@ def main() -> None:
         p.add_argument("--base-url", default=None,
                        help="OpenAI 兼容端点, 可指向本地 vLLM。逗号分隔可写多路轮转。"
                             "不填则读环境变量 VLM_BASE_URL")
+        p.add_argument("--endpoints", default=None,
+                       help="端点池 yaml(generate / review 两组)。填了它就不用 --base-url; "
+                            "每一路各带自己的 model 与 key")
         p.add_argument("--cache-dir", default=".llm_cache", help="按请求哈希缓存, 重跑不重复计费")
-        p.add_argument("--workers", type=int, default=8)
+        p.add_argument("--workers", type=int, default=8,
+                       help="并发数。填 0 = 跟着端点池的总并发走")
         p.add_argument("--inline-images", action="store_true", help="图像转 base64 内联(远端 API 需要)")
         p.add_argument("--dry-run", action="store_true", help="只写请求, 不调用 API")
         p.add_argument("--exclude-ids", default=None,

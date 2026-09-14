@@ -1,0 +1,45 @@
+# 推理端点池。**复制为 configs/endpoints.local.yaml 再填真实 key** ——
+# local.yaml 已进 .gitignore，密钥不要提交到仓库。
+#
+#   cp configs/endpoints.yaml.example configs/endpoints.local.yaml
+#   vim configs/endpoints.local.yaml          # 把 key 换成真的
+#   python tools/llm_qa.py generate --endpoints configs/endpoints.local.yaml ...
+#
+# 字段:
+#   url          填到 /v1 为止或整条 /v1/chat/completions 都行, 代码会归一化
+#   model        每一路各自的模型名, 池子里混用不同模型也可以
+#   key          该路的 API key
+#   concurrency  这一路能扛多少并发。请求按它加权轮转 —— 能扛 8 的分到的请求是扛 4 的两倍
+#   enabled      false = 暂停这一路。**不用删配置**, 机器恢复了改回来即可
+
+# ── 生成: 写描述与推理。局域网的机器放这里, 便宜量大
+generate:
+  - {name: "59-1",  url: "http://10.107.230.59:8001/v1",   model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  - {name: "59-2",  url: "http://10.107.230.59:8002/v1",   model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  - {name: "59-3",  url: "http://10.107.230.59:8003/v1",   model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  - {name: "59-4",  url: "http://10.107.230.59:8004/v1",   model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  - {name: "103-1", url: "http://10.200.100.103:8001/v1",  model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  - {name: "103-2", url: "http://10.200.100.103:8002/v1",  model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  - {name: "103-3", url: "http://10.200.100.103:8003/v1",  model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  - {name: "103-4", url: "http://10.200.100.103:8004/v1",  model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  - {name: "7-1",   url: "http://10.107.238.7:8001/v1",    model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  - {name: "7-2",   url: "http://10.107.238.7:8002/v1",    model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  - {name: "7-3",   url: "http://10.107.238.7:8003/v1",    model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  - {name: "7-4",   url: "http://10.107.238.7:8004/v1",    model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  - {name: "47-1",  url: "http://10.107.234.47:8001/v1",   model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  - {name: "47-2",  url: "http://10.107.234.47:8002/v1",   model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  - {name: "47-3",  url: "http://10.107.234.47:8003/v1",   model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  - {name: "47-4",  url: "http://10.107.234.47:8004/v1",   model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  # 26.27 那台暂停中, 恢复后把 enabled 改回 true
+  - {name: "27-1",  url: "http://10.107.226.27:8001/v1",   model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4, enabled: false}
+  - {name: "27-2",  url: "http://10.107.226.27:8002/v1",   model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4, enabled: false}
+  - {name: "27-3",  url: "http://10.107.226.27:8003/v1",   model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4, enabled: false}
+  - {name: "27-4",  url: "http://10.107.226.27:8004/v1",   model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4, enabled: false}
+
+# ── 审稿: **必须换一个模型**。同一个模型审自己写的答案基本全过, 六维形同虚设。
+# 122B 正好是池子里唯一和 27B 不同的那个, 用它来审。
+review:
+  - {name: "云-122B", url: "http://<换成你的域名>:31080/v1", model: "Qwen3.5-122B-A10B", key: "<填 sk>", concurrency: 2}
+
+# ── 闸5 图像质检(可选, 不配就复用 generate)
+screen: []

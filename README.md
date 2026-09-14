@@ -53,10 +53,11 @@
 bash run_all.sh /path/to/数据根目录
 
 # 配了端点: 一路跑到 LLM 描述/推理生成 + must-not 硬过滤 + 六维 review
-VLM_BASE_URL=http://127.0.0.1:8000/v1 \
-VLM_MODEL=qwen2.5-vl-72b-instruct \
-REVIEW_MODEL=internvl2_5-78b \
-bash run_all.sh /path/to/数据根目录
+cp configs/endpoints.yaml.example configs/endpoints.local.yaml   # 再填真实 key
+bash run_all.sh /path/to/数据根目录       # 自动读 configs/endpoints.local.yaml
+
+# 正式跑之前先试水: 分层抽 200 个 scene, 人眼看十条再决定
+LLM_SAMPLE=200 bash run_all.sh /path/to/数据根目录
 
 python tools/doctor.py --root /path/to/数据根目录   # 只体检: 看手上的数据能产出哪些异常类
 ```
@@ -65,13 +66,14 @@ python tools/doctor.py --root /path/to/数据根目录   # 只体检: 看手上�
 
 | 环境变量 | 默认 | 作用 |
 |---|---|---|
-| `VLM_BASE_URL` | 空 | OpenAI 兼容端点。**留空就只导出请求，不调用任何 API** |
+| `ENDPOINTS` | 自动找 `configs/endpoints.local.yaml` | **端点池配置**（推荐）。每一路各带自己的 model 与 key，按 concurrency 加权轮转 |
+| `VLM_BASE_URL` | 空 | 单地址写法。有端点池时不用填；两个都空就只导出请求，不调用任何 API |
 | `VLM_MODEL` | `qwen2.5-vl-72b-instruct` | 写描述/推理的模型 |
 | `REVIEW_MODEL` | 同 `VLM_MODEL` | 审稿模型。**务必换一个**——同一个模型审自己写的答案基本全过 |
 | `TARGET_PER_CLASS` | `25000` | 每个异常类的目标条数。富余的按图下采样，稀缺的自动提高每图侧面数，仍不足则如实报缺口 |
 | `FACETS_PER_IMAGE` | `4` | 每张图抽几个描述侧面（会被配额上调/下调） |
 | `INLINE_IMAGES` | `0` | 置 1 把图转 base64 内联。远端 API 需要；本地 vLLM 挂同一块盘就不用 |
-| `WORKERS` | `8` | 并发数 |
+| `WORKERS` | `0` | 并发数。`0` = 跟着端点池的总并发走，不用手算 |
 | `LLM_SAMPLE` | `0` | 只跑 N 个 scene 的试水批（按类别分层抽）。正式跑之前务必先用它看十条答案 |
 | `SKIP_PREPARED` | `0` | 置 1 跳过已有中间文件。某个数据集失败后补跑它一个，不用把另外八个几万张图再走一遍 |
 | `MOT_BOUNDARIES` | `4` | 每个 MOT 序列铺几条平行边界线 |
@@ -325,3 +327,27 @@ docs/                              数据源调研 + schema 设计
 ## 合规
 
 本项目仅用于**监控画面异常事件识别**的研究与训练数据构建。所有数据源的许可条件见 [docs/01_data_sources.md 第 7 节](docs/01_data_sources.md#7-合规与许可注意事项)；每条 QA 都带 `source_dataset` 与 `license` 字段，发布时请按许可分层裁剪。MOCO 等申请制数据集须走完申请流程后方可使用。
+
+
+## 推理端点池
+
+多机多卡时把端点写进 `configs/endpoints.local.yaml`（**该文件已进 `.gitignore`，密钥不入库**）：
+
+```yaml
+generate:              # 写描述与推理，局域网的机器放这里
+  - {name: "59-1", url: "http://10.x.x.x:8001/v1", model: "Qwen3.8-27B", key: "...", concurrency: 4}
+  - ...
+  - {name: "27-1", url: "...", model: "Qwen3.8-27B", key: "...", concurrency: 4, enabled: false}   # 暂停这一路
+review:                # 审稿必须换一个模型
+  - {name: "122B", url: "http://...:31080/v1", model: "Qwen3.5-122B-A10B", key: "sk-...", concurrency: 2}
+```
+
+- **每一路各带自己的 model 与 key**。局域网那十几路共用一个 key，云端那几路各有各的 sk，
+  一个全局 key 配不下来。
+- 请求按 `concurrency` **加权轮转**：能扛 8 并发的那路分到的请求是扛 4 的两倍。
+- 某一路连不上就摘掉，其余照跑；`enabled: false` 用来暂停机器，**不用删配置**。
+- `WORKERS=0`（默认）会让并发数自动跟随池子总和，不用手算。
+- `url` 填到 `/v1` 为止或整条 `/v1/chat/completions` 都行，代码会归一化。
+
+**审稿一定要用 `review` 组换一个模型。** 同一个模型审自己写的答案基本全过，
+六维 review 就成了摆设——这也是为什么池子里那个 122B 比多一台 27B 更值钱。

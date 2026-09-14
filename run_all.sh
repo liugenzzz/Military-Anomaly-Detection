@@ -12,14 +12,18 @@ PY="${PYTHON:-python3}"
 # ── LLM 生成: 配了端点就真跑, 没配就只导出请求(离线批推理也能吃这个文件)
 #   VLM_BASE_URL=http://192.168.78.36:3012/v1 VLM_MODEL=Qwen3.6-27B bash run_all.sh <数据根>
 VLM_BASE_URL="${VLM_BASE_URL:-}"
-VLM_MODEL="${VLM_MODEL:-Qwen3.6-27B}"   # 与目标检测那个项目同一套服务
+VLM_MODEL="${VLM_MODEL:-Qwen3.8-27B}"
+# 端点池配置(推荐)。填了它就不用 VLM_BASE_URL, 每一路各带自己的 model 与 key。
+#   cp configs/endpoints.yaml.example configs/endpoints.local.yaml   # 再填真实 key
+ENDPOINTS="${ENDPOINTS:-}"
+[ -z "$ENDPOINTS" ] && [ -f configs/endpoints.local.yaml ] && ENDPOINTS=configs/endpoints.local.yaml
 # review 最好换一个模型: 同一个模型审自己写的答案基本全过, 六维形同虚设
 REVIEW_MODEL="${REVIEW_MODEL:-$VLM_MODEL}"
 TARGET_PER_CLASS="${TARGET_PER_CLASS:-25000}"   # 每个异常类的 QA 总目标
 DESC_SHARE="${DESC_SHARE:-60}"             # 其中描述+推理(LLM 侧)占几成, 单位 %
 LLM_TARGET=$(( TARGET_PER_CLASS * DESC_SHARE / 100 ))
 RULE_TARGET=$(( TARGET_PER_CLASS - LLM_TARGET ))
-WORKERS="${WORKERS:-8}"
+WORKERS="${WORKERS:-0}"    # 0 = 跟着端点池的总并发走
 FACETS_PER_IMAGE="${FACETS_PER_IMAGE:-4}"
 # 试水批: 只跑 N 个 scene(按类别分层抽), 用来在烧算力之前先看看答案写成什么样
 LLM_SAMPLE="${LLM_SAMPLE:-0}"
@@ -143,18 +147,22 @@ run $PY tools/build_vqa.py --scenes "$KEPT" --out-dir "$OUT/vqa_rule" \
 
 GEN="$OUT/interim/llm_generated.jsonl"
 INLINE=(); [ "$INLINE_IMAGES" = "1" ] && INLINE=(--inline-images)
-if [ -n "$VLM_BASE_URL" ]; then
-  step "6a. LLM 生成描述/推理 (模型 $VLM_MODEL @ $VLM_BASE_URL)"
+if [ -n "$VLM_BASE_URL" ] || [ -n "$ENDPOINTS" ]; then
+  if [ -n "$ENDPOINTS" ]; then WHERE="端点池 $ENDPOINTS"; else WHERE="$VLM_MODEL @ $VLM_BASE_URL"; fi
+  step "6a. LLM 生成描述/推理 ($WHERE)"
   run $PY tools/llm_qa.py generate --scenes "$KEPT" \
       --facets-per-image "$FACETS_PER_IMAGE" --target-per-class "$LLM_TARGET" \
-      $( [ "$LLM_SAMPLE" != 0 ] && echo "--sample $LLM_SAMPLE" ) --base-url "$VLM_BASE_URL" --model "$VLM_MODEL" --workers "$WORKERS" \
+      $( [ "$LLM_SAMPLE" != 0 ] && echo "--sample $LLM_SAMPLE" ) ${ENDPOINTS:+--endpoints "$ENDPOINTS"} ${VLM_BASE_URL:+--base-url "$VLM_BASE_URL"} \
+      --model "$VLM_MODEL" --workers "$WORKERS" \
       ${INLINE[@]+"${INLINE[@]}"} ${EXC:+--exclude-ids "$EXC"} --out "$GEN"
   if [ -s "$GEN" ]; then
-    step "6b. must-not 硬过滤 + 六维 review (审稿模型 $REVIEW_MODEL)"
-    [ "$REVIEW_MODEL" = "$VLM_MODEL" ] && \
+    if [ -n "$ENDPOINTS" ]; then RWHERE="审稿端点见 $ENDPOINTS 的 review 组"; else RWHERE="审稿模型 $REVIEW_MODEL"; fi
+    step "6b. must-not 硬过滤 + 六维 review ($RWHERE)"
+    [ -z "$ENDPOINTS" ] && [ "$REVIEW_MODEL" = "$VLM_MODEL" ] && \
       echo "  [注意] 审稿和生成是同一个模型, 自己审自己会虚高, 建议 REVIEW_MODEL 换一个"
     run $PY tools/llm_qa.py verify --generated "$GEN" \
-        --base-url "$VLM_BASE_URL" --model "$REVIEW_MODEL" --workers "$WORKERS" \
+        ${ENDPOINTS:+--endpoints "$ENDPOINTS"} ${VLM_BASE_URL:+--base-url "$VLM_BASE_URL"} \
+        --model "$REVIEW_MODEL" --workers "$WORKERS" \
         ${INLINE[@]+"${INLINE[@]}"} --out "$OUT/vqa_llm/all.json"
   else
     echo "  生成结果为空, 跳过 review"

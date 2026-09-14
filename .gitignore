@@ -19,3 +19,6 @@ data/vqa_rule/
 data/vqa_llm/
 data/tiles/
 data/frames/
+
+# 端点配置带密钥, 不入库
+configs/endpoints.local.yaml
