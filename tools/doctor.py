@@ -56,16 +56,25 @@ def _near_match(dir_name: str, cand: str) -> bool:
     return len(a) - len(b) <= 4 or tail[:1] in ("-", "_", ".", " ")
 
 
-def _has_payload(d: Path) -> bool:
-    """这个目录里有没有真东西(图/视频/标注), 而不只是压缩包。"""
-    n = 0
+def _payload_rank(d: Path) -> int:
+    """这个候选目录里有多少真东西: 2=有图/视频, 1=只有标注, 0=只有压缩包。
+
+    分两档而不是一个布尔值, 是有原因的: MAR20/ 里躺着 15235 个 xml 标注,
+    按"有标注就算数"判定, 它会直接胜出, 旁边真正解压出 JPEGImages 的
+    MAR201/ 反而被跳过 —— 这正是第一版踩的坑。媒体优先, 标注只是兜底,
+    兜底是给 CapERA / HIVAU-70k 这种本来就没有图像的数据集用的。
+    """
+    rank, n = 0, 0
     for f in d.rglob("*"):
-        if f.suffix.lower() in IMG + VID + (".xml", ".txt", ".json", ".csv"):
-            return True
+        suf = f.suffix.lower()
+        if suf in IMG + VID:
+            return 2
+        if suf in (".xml", ".txt", ".json", ".csv", ".mat"):
+            rank = 1
         n += 1
-        if n > 20000:
+        if n > 50000:
             break
-    return False
+    return rank
 
 
 def _find(root: Path, names: list[str]) -> Path | None:
@@ -93,10 +102,11 @@ def _find(root: Path, names: list[str]) -> Path | None:
 
     seen: set[Path] = set()
     uniq = [c for c in cands if not (c in seen or seen.add(c))]
-    for c in uniq:
-        if _has_payload(c):
-            return c
-    return uniq[0] if uniq else None
+    if not uniq:
+        return None
+    # 取"内容最实在"的那个; 同档次时保持候选顺序(名字越具体越靠前)
+    best = max(range(len(uniq)), key=lambda i: (_payload_rank(uniq[i]), -i))
+    return uniq[best]
 
 
 def _count(d: Path, exts: tuple[str, ...], cap: int = 200000) -> int:
@@ -200,6 +210,15 @@ def main() -> None:
             blocked.append((name, feeds, critical, "目录不存在"))
             continue
 
+        # 名字对不上时(MAR20 -> MAR201, VisDrone -> VisDrone/VisDrone2019-MOT-train)
+        # 要把实际认到的目录显示出来。不说清楚的话, 一旦认错就是静默的,
+        # 得等跑完半小时才发现扫的是另一个目录。
+        try:
+            rel = str(d.relative_to(root))
+        except ValueError:
+            rel = str(d)
+        disp = name if rel == name else f"{name}→{rel}"
+
         n_img, n_vid = _count(d, IMG), _count(d, VID)
         n_ann = _count(d, (".txt", ".xml", ".json", ".mat"))
         subdirs = {x.name for x in d.iterdir() if x.is_dir()}
@@ -211,29 +230,34 @@ def main() -> None:
 
         if ann_only:
             if n_ann > 2:
-                print(f"{mark} {name:24s} ✓ {n_ann} 个标注文件（本数据集不含图像，媒体复用其他集）")
+                print(f"{mark} {disp:24s} ✓ {n_ann} 个标注文件（本数据集不含图像，媒体复用其他集）")
                 ready.append((name, feeds))
             else:
-                print(f"{mark} {name:24s} ✗ 标注文件不足   ({detail})")
+                print(f"{mark} {disp:24s} ✗ 标注文件不足   ({detail})")
                 blocked.append((name, feeds, critical, "标注缺失"))
             continue
         if n_img == 0 and n_vid == 0:
             if has_arch and subdirs <= {"archives"}:
                 sizes = sum(f.stat().st_size for f in arch.rglob("*") if f.is_file())
-                print(f"{mark} {name:24s} ⚠ 只有 archives/ 未解压   "
+                print(f"{mark} {disp:24s} ⚠ 只有 archives/ 未解压   "
                       f"({len(list(arch.iterdir()))} 个压缩包, {sizes // 2**20} MB)")
                 blocked.append((name, feeds, critical, "未解压"))
+            elif "archives" in subdirs and not has_arch:
+                # archives/ 建出来了却是空的 —— 这是下载没成功, 不是没解压。
+                # 两者的下一步动作完全不同, 分开报。
+                print(f"{mark} {disp:24s} ✗ archives/ 是空的, 该数据集没下下来")
+                blocked.append((name, feeds, critical, "未下载"))
             else:
                 files = sorted(x.name for x in d.iterdir() if x.is_file())[:5]
                 why = "目录为空" if not subdirs and not files else "无图像/视频"
-                print(f"{mark} {name:24s} ✗ {why}   ({detail})")
+                print(f"{mark} {disp:24s} ✗ {why}   ({detail})")
                 if subdirs or files:
                     print(f"{'':27s}实际内容: 子目录 {sorted(subdirs)[:5] or '无'}，"
                           f"文件 {files or '无'}")
                 blocked.append((name, feeds, critical, why))
             continue
 
-        print(f"{mark} {name:24s} ✓ {detail}")
+        print(f"{mark} {disp:24s} ✓ {detail}")
         extra: list[str] = []
         if name == "ERA":
             extra = check_era(d)
