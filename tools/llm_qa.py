@@ -478,6 +478,24 @@ def cmd_generate(args, onto):
     zh = {c["id"]: c["zh"] for c in onto["classes"]}
     scenes = load_scenes_excluding(args.scenes, args.exclude_ids)
     rng = random.Random(args.seed)
+    cls_total0: dict[str, int] = {}
+    for sc in scenes:
+        for c in (sc.anomaly_types or ["normal"]):
+            cls_total0[c] = cls_total0.get(c, 0) + 1
+
+    if args.sample:
+        by: dict[str, list[Scene]] = {}
+        for sc in scenes:
+            by.setdefault(min(sc.anomaly_types or ["normal"],
+                              key=lambda c: (cls_total0.get(c, 0), c)), []).append(sc)
+        per = max(1, args.sample // max(1, len(by)))
+        picked: list[Scene] = []
+        for cls in sorted(by):
+            pool = by[cls][:]
+            rng.shuffle(pool)
+            picked += pool[:per]
+        scenes = picked[:args.sample]
+        print(f"试水批: 分层抽 {len(scenes)} 个 scene, 覆盖 {len(by)} 个类别")
 
     plan = (plan_quota(scenes, facets, args.target_per_class, args.facets_per_image,
                        args.reason_ratio, args.seed)
@@ -755,6 +773,10 @@ def main() -> None:
     p.add_argument("--temperature", type=float, default=0.55,
                    help="描述求准不求奇, 0.5~0.6 即可; 多样性靠侧面与问法池, 不靠高温")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--sample", type=int, default=0,
+                   help="只跑 N 个 scene 的试水批。**按类别分层抽**, 不是取前 N 条 —— "
+                        "scene 是按数据源排好序的, 取前 N 条只会拿到同一个数据集的图, "
+                        "看不出别的类写成什么样")
     p.add_argument("--target-per-class", type=int, default=0,
                    help="每个异常类的目标条数(描述侧)。富余的按图下采样, "
                         "稀缺的自动提高每图侧面数, 仍不足则报缺口。0 表示不限")

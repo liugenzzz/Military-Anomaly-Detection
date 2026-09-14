@@ -72,6 +72,7 @@ python tools/doctor.py --root /path/to/数据根目录   # 只体检: 看手上�
 | `FACETS_PER_IMAGE` | `4` | 每张图抽几个描述侧面（会被配额上调/下调） |
 | `INLINE_IMAGES` | `0` | 置 1 把图转 base64 内联。远端 API 需要；本地 vLLM 挂同一块盘就不用 |
 | `WORKERS` | `8` | 并发数 |
+| `LLM_SAMPLE` | `0` | 只跑 N 个 scene 的试水批（按类别分层抽）。正式跑之前务必先用它看十条答案 |
 | `SKIP_PREPARED` | `0` | 置 1 跳过已有中间文件。某个数据集失败后补跑它一个，不用把另外八个几万张图再走一遍 |
 | `MOT_BOUNDARIES` | `4` | 每个 MOT 序列铺几条平行边界线 |
 | `STRIDE_MOT` | `4` | MOT 抽帧间隔。**越界类的产量上限就是它的过筛帧数**，所以比别的源抽得密 |

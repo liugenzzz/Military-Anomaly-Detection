@@ -21,6 +21,8 @@ LLM_TARGET=$(( TARGET_PER_CLASS * DESC_SHARE / 100 ))
 RULE_TARGET=$(( TARGET_PER_CLASS - LLM_TARGET ))
 WORKERS="${WORKERS:-8}"
 FACETS_PER_IMAGE="${FACETS_PER_IMAGE:-4}"
+# 试水批: 只跑 N 个 scene(按类别分层抽), 用来在烧算力之前先看看答案写成什么样
+LLM_SAMPLE="${LLM_SAMPLE:-0}"
 # 有多少比例的图把"判定 -> 带框描述 -> 异常说明"拼成一条多轮对话。
 # 全拼会让模型以为回答必须是三段, 单问一句也长篇大论, 所以只拼三成。
 CHAIN_RATIO="${CHAIN_RATIO:-0.30}"
@@ -145,7 +147,7 @@ if [ -n "$VLM_BASE_URL" ]; then
   step "6a. LLM 生成描述/推理 (模型 $VLM_MODEL @ $VLM_BASE_URL)"
   run $PY tools/llm_qa.py generate --scenes "$KEPT" \
       --facets-per-image "$FACETS_PER_IMAGE" --target-per-class "$LLM_TARGET" \
-      --base-url "$VLM_BASE_URL" --model "$VLM_MODEL" --workers "$WORKERS" \
+      $( [ "$LLM_SAMPLE" != 0 ] && echo "--sample $LLM_SAMPLE" ) --base-url "$VLM_BASE_URL" --model "$VLM_MODEL" --workers "$WORKERS" \
       ${INLINE[@]+"${INLINE[@]}"} ${EXC:+--exclude-ids "$EXC"} --out "$GEN"
   if [ -s "$GEN" ]; then
     step "6b. must-not 硬过滤 + 六维 review (审稿模型 $REVIEW_MODEL)"
