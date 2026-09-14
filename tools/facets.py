@@ -163,11 +163,14 @@ def load_tool(name: str, prompt_dir: str | Path = PROMPT_DIR) -> str:
 
 # ---------------------------------------------------------------- 自检
 EXPECTED = {
-    "massing": {"evidence", "position", "full", "formation", "composition", "scale", "site"},
-    "explosion": {"evidence", "position", "full", "intensity", "debris", "extent", "stage"},
-    "smoke": {"evidence", "position", "full", "morphology", "color", "drift", "occlusion"},
-    "border_crossing": {"evidence", "position", "full", "trajectory", "timing",
-                        "boundary_relation", "group"},
+    "massing": {"evidence", "position", "full", "grounded",
+                "formation", "composition", "scale", "site"},
+    "explosion": {"evidence", "position", "full", "grounded",
+                  "intensity", "debris", "extent", "stage"},
+    "smoke": {"evidence", "position", "full", "grounded",
+              "morphology", "color", "drift", "occlusion"},
+    "border_crossing": {"evidence", "position", "full", "grounded",
+                        "trajectory", "timing", "boundary_relation", "group"},
     "normal": {"position", "full", "hard_neg", "scan"},
 }
 
@@ -205,10 +208,16 @@ def check(prompt_dir: str | Path = PROMPT_DIR) -> list[str]:
                 errs.append(f"[{tag}] q-bank 只有 {len(fa.q_bank)} 条, 少于 6 条")
             if len(fa.q_bank) != len(set(fa.q_bank)):
                 errs.append(f"[{tag}] q-bank 有重复问法")
-            # 5. 描述类问法不得要坐标
-            for q in fa.q_bank:
-                if any(w in q for w in ("坐标", "框出", "边界框", "bbox")):
-                    errs.append(f"[{tag}] q-bank 出现要坐标的问法: {q}")
+            # 5. 描述类问法不得要坐标 —— grounded 除外, 它本来就是"描述 + 框",
+            #    但它的坐标由管线补, 所以反过来要求它的 must-not 必须挡住坐标词
+            if fa.kind == "grounded":
+                if not any(w in fa.must_not for w in ("坐标", "bbox")):
+                    errs.append(f"[{tag}] grounded 侧面必须在 must-not 里禁掉坐标词, "
+                                f"坐标由管线补, 模型自己写会和真值打架")
+            else:
+                for q in fa.q_bank:
+                    if any(w in q for w in ("坐标", "框出", "边界框", "bbox")):
+                        errs.append(f"[{tag}] q-bank 出现要坐标的问法: {q}")
             if fa.path:
                 seen_files.add(fa.path)
 

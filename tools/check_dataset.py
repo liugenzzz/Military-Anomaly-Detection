@@ -25,6 +25,7 @@ def main() -> None:
     qa_types, anomalies, sources = Counter(), Counter(), Counter()
     styles, turns = Counter(), Counter()
     facets, gens, imgs, mods = Counter(), Counter(), Counter(), Counter()
+    cover = Counter()          # 训练要求的三件事各覆盖了多少条
     total = 0
     missing = set()
 
@@ -51,6 +52,17 @@ def main() -> None:
             if "images" in s and "videos" in s:
                 problems.append(f"{fp}#{i}: 同时含 images 与 videos, LLaMA-Factory 无法加载")
             answers = " ".join(m["content"] for m in body[1::2])
+            # 训练要求的三件事分别数一下 —— 光看题型分布看不出"文字+图像区域"覆盖到没有
+            has_box = "bbox_2d" in answers
+            prose = len(re.findall(r"[\u4e00-\u9fff]", re.sub(r"\{[^{}]*\}", "", answers)))
+            if has_box and prose >= 30:
+                cover["多模态描述(文字+图像区域)"] += 1
+            elif has_box:
+                cover["纯坐标(grounding)"] += 1
+            elif prose >= 30:
+                cover["纯文字描述/说明"] += 1
+            else:
+                cover["短答(判定/计数等)"] += 1
             for box in BOX_RE.findall(answers):
                 x1, y1, x2, y2 = map(int, box)
                 if not (0 <= x1 < x2 <= args.box_scale and 0 <= y1 < y2 <= args.box_scale):
@@ -82,6 +94,7 @@ def main() -> None:
     show("数据来源分布", sources)
     if facets:
         show("描述侧面分布", facets)
+    show("训练要求覆盖", cover)
     show("生成方式", Counter({"规则" if k == "rule" else ("LLM" if k == "llm" else k): v
                               for k, v in gens.items()}))
     show("对话轮数分布", Counter({f"{k} 轮": v for k, v in turns.items()}))

@@ -126,6 +126,40 @@ def _region_zh(ev: dict[str, Any]) -> str:
     return "禁区边界" if ev.get("region_type") == "polygon" else "界线"
 
 
+def crossed_objs(s: Scene) -> list[Obj]:
+    tids = {str(e.evidence.get("track_id")) for e in s.events
+            if e.evidence.get("rule") == "boundary_cross"}
+    return [o for o in s.objects if o.track_id is not None and str(o.track_id) in tids]
+
+
+def region_box_of(s: Scene, zh: dict[str, str]) -> tuple[list[float], str] | None:
+    """异常区域的像素 bbox 与标签。没有区域信息就返回 None。
+
+    规则侧和 LLM 侧共用这一份 —— 带框描述那类题里, **文字由模型写, 坐标由这里算**,
+    两边必须是同一个框, 否则同一张图的坐标题和描述题会给出不一样的框。
+    """
+    ev = next((e for e in s.events if "cluster_bbox" in e.evidence), None)
+    if ev:
+        return ev.evidence["cluster_bbox"], f"{zh.get(ev.type, ev.type)}区域"
+    for e in s.events:
+        if e.evidence.get("boxes"):
+            bs = e.evidence["boxes"]
+            xs = [b[0] for b in bs] + [b[2] for b in bs]
+            ys = [b[1] for b in bs] + [b[3] for b in bs]
+            return [min(xs), min(ys), max(xs), max(ys)], zh.get(e.type, e.type)
+    cands = [o for o in s.objects if o.cls in ("fire", "smoke")]
+    if cands:
+        o = max(cands, key=lambda x: x.area)
+        return o.bbox, CLS_ZH.get(o.cls, o.cls)
+    # 越界场景没有 cluster_bbox, 用越界目标的外接框
+    objs = crossed_objs(s)
+    if objs:
+        xs = [v for o in objs for v in (o.bbox[0], o.bbox[2])]
+        ys = [v for o in objs for v in (o.bbox[1], o.bbox[3])]
+        return [min(xs), min(ys), max(xs), max(ys)], "越界目标所在区域"
+    return None
+
+
 # ---------------------------------------------------------------- 生成器
 class RuleBuilder:
     def __init__(self, onto: dict[str, Any], prompt_dir: str, seed: int = 0):
@@ -151,32 +185,10 @@ class RuleBuilder:
         return next((e for e in s.events if "cluster_bbox" in e.evidence), None)
 
     def _region_box(self, s: Scene) -> tuple[list[float], str] | None:
-        """异常区域的像素 bbox 与标签。没有区域信息就返回 None。"""
-        ev = self._cluster(s)
-        if ev:
-            return ev.evidence["cluster_bbox"], f"{self.zh.get(ev.type, ev.type)}区域"
-        for e in s.events:
-            if e.evidence.get("boxes"):
-                bs = e.evidence["boxes"]
-                xs = [b[0] for b in bs] + [b[2] for b in bs]
-                ys = [b[1] for b in bs] + [b[3] for b in bs]
-                return [min(xs), min(ys), max(xs), max(ys)], self.zh.get(e.type, e.type)
-        cands = [o for o in s.objects if o.cls in ("fire", "smoke")]
-        if cands:
-            o = max(cands, key=lambda x: x.area)
-            return o.bbox, CLS_ZH.get(o.cls, o.cls)
-        # 越界场景没有 cluster_bbox, 用越界目标的外接框
-        objs = self._crossed_objs(s)
-        if objs:
-            xs = [v for o in objs for v in (o.bbox[0], o.bbox[2])]
-            ys = [v for o in objs for v in (o.bbox[1], o.bbox[3])]
-            return [min(xs), min(ys), max(xs), max(ys)], "越界目标所在区域"
-        return None
+        return region_box_of(s, self.zh)
 
     def _crossed_objs(self, s: Scene) -> list[Obj]:
-        tids = {str(e.evidence.get("track_id")) for e in s.events
-                if e.evidence.get("rule") == "boundary_cross"}
-        return [o for o in s.objects if o.track_id is not None and str(o.track_id) in tids]
+        return crossed_objs(s)
 
     def _mk(self, s: Scene, turns: list[tuple[str, str]], task: str, **extra) -> dict:
         msgs: list[dict] = [{"role": "system", "content": self.system}]

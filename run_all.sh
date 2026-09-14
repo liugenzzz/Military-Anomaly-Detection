@@ -21,6 +21,9 @@ LLM_TARGET=$(( TARGET_PER_CLASS * DESC_SHARE / 100 ))
 RULE_TARGET=$(( TARGET_PER_CLASS - LLM_TARGET ))
 WORKERS="${WORKERS:-8}"
 FACETS_PER_IMAGE="${FACETS_PER_IMAGE:-4}"
+# 有多少比例的图把"判定 -> 带框描述 -> 异常说明"拼成一条多轮对话。
+# 全拼会让模型以为回答必须是三段, 单问一句也长篇大论, 所以只拼三成。
+CHAIN_RATIO="${CHAIN_RATIO:-0.30}"
 INLINE_IMAGES="${INLINE_IMAGES:-0}"        # 远端 API 要 base64 内联; 本地 vLLM 挂同一块盘就不用
 RELAX_BELOW="${RELAX_BELOW:-3000}"         # 产量低于这么多张图的类启用放宽档补量, 0 关闭
 # 抽帧间隔。与 configs/ontology.yaml 的 stride 保持一致: 30 对 DroneCrowd 和
@@ -129,7 +132,8 @@ else
 fi
 
 step "7. 合并为 LLaMA-Factory 数据集"
-run $PY tools/merge_dataset.py --in "$OUT/vqa_rule" "$OUT/vqa_llm" --out "$OUT/vqa"
+run $PY tools/merge_dataset.py --in "$OUT/vqa_rule" "$OUT/vqa_llm" --out "$OUT/vqa" \
+    --chain-ratio "$CHAIN_RATIO"
 
 if [ -n "$MEDIA_ROOT" ]; then
   step "7b. 媒体归集 -> $MEDIA_ROOT/$MEDIA_NAME/{images,videos}/"

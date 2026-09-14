@@ -31,8 +31,8 @@ from typing import Any
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ds.boxes import BBOX_SCALE, COORD_MODE
-from build_vqa import scene_quality  # noqa: E402  与规则侧共用一套质量分口径
+from ds.boxes import BBOX_SCALE, COORD_MODE, box_json, to_bbox2d  # noqa: E402
+from build_vqa import region_box_of, scene_quality  # noqa: E402  与规则侧共用一套口径
 from facets import Facet, load_all, load_tool
 from scene import Scene, load_scenes
 
@@ -46,6 +46,8 @@ FACET_WEIGHTS = {
     "morphology": 18, "color": 18, "drift": 15, "occlusion": 12,
     "trajectory": 18, "timing": 18, "boundary_relation": 15, "group": 12,
     "hard_neg": 40, "scan": 30,
+    # 带框描述: 训练要求里"多模态描述(文字+图像区域)"直接对应这一类, 权重给到最高
+    "grounded": 30,
 }
 SKIP_FACETS = {"position"}
 BOX_SCALE = BBOX_SCALE
@@ -77,6 +79,7 @@ def facet_applicable(kind: str, s: Scene) -> bool:
         "hard_neg": bool(s.meta.get("hard_negative")),
         "scan": not s.events,
         "evidence": bool(s.events),
+        "grounded": bool(s.events) and region_box_of(s, {}) is not None,
         "full": True,
     }.get(kind, True)
 
@@ -468,7 +471,12 @@ def cmd_generate(args, onto):
             q = rng.choice(fa.q_bank).replace("{zh}", zh.get(anomaly, "异常"))
             bans = fa.bans_for(anomaly)
             facts_str = json.dumps(trim_facts(facts, fa.kind), ensure_ascii=False, indent=1)
+            region = None
+            if fa.kind == "grounded" and (rb := region_box_of(s, zh)):
+                box, label = rb
+                region = {"box_1000": to_bbox2d(box, s.width, s.height), "label": label}
             reqs.append({
+                "region": region,
                 "image_id": s.image_id, "image_path": s.image_path,
                 "media_field": s.media[0], "media": s.media[1],
                 "modality": s.modality, "kind": "describe", "facet": fa.kind, "anomaly": anomaly,
@@ -583,6 +591,7 @@ def cmd_verify(args, onto):
     # ── 落盘
     dims = ("correct", "grounded", "facet", "instruction", "needs_image", "no_overclaim")
     out: list[dict] = []
+    n_grounded = 0
     dim_fail: dict[str, int] = {}
     for i, r in enumerate(kept):
         v = verdicts.get(i)
@@ -597,10 +606,17 @@ def cmd_verify(args, onto):
         field = r.get("media_field", "images")
         paths = r.get("media") or [r["image_path"]]
         tok = "<video>" if field == "videos" else "<image>"
+        answer = r["answer"]
+        if r.get("facet") == "grounded" and r.get("region"):
+            # 文字是模型写的, 坐标是规则算的 —— 在这里才合成一条"文字 + 图像区域"的答案。
+            # 坐标从来不经过模型, 所以不存在框报偏的问题。
+            n_grounded += 1
+            answer = answer.rstrip() + "\n" + box_json(r["region"]["box_1000"],
+                                                       r["region"]["label"])
         out.append({
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": tok * len(paths) + r["question"]},
-                         {"role": "assistant", "content": r["answer"]}],
+                         {"role": "assistant", "content": answer}],
             field: paths,
             "extra": {"image_id": r["image_id"], "task": r["kind"], "facet": r["facet"],
                       "gen": "llm", "n_turns": 1,
@@ -633,6 +649,8 @@ def cmd_verify(args, onto):
                   "建议收紧 answer-spec 或把 temperature 降到 0.5 以下")
     from collections import Counter
     print("  侧面分布:", dict(Counter(s["extra"]["facet"] for s in out).most_common()))
+    if n_grounded:
+        print(f"  其中带框描述(文字+图像区域) {n_grounded} 条, 坐标由规则给出")
 
 
 def _write_requests(reqs: list[dict], out: str) -> None:

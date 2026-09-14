@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 from pathlib import Path
 
 SPLITS = ("train", "val", "test")
@@ -25,12 +26,80 @@ def _load(p: Path) -> list[dict]:
     return d if isinstance(d, list) else []
 
 
+_TOK = ("<image>", "<video>")
+
+
+def _strip_tok(text: str) -> str:
+    for t in _TOK:
+        text = text.replace(t, "")
+    return text
+
+
+def compose_chains(rows: list[dict], ratio: float, seed: int = 0) -> list[dict]:
+    """把同一张图的"判定 + 带框描述 + 异常说明"拼成一条三轮对话。
+
+    训练要求是一条链: 认出异常 -> 给出文字+区域的描述 -> 说明为什么异常。
+    三种题分散在三条单轮样本里, 模型学到的是三件独立的事, 串不起来;
+    拼成一轮对话, 它才会在同一段语境里把结论、证据和区域对齐。
+
+    只拼一部分(ratio), 单轮样本仍然保留大头 —— 全拼成三轮, 模型会以为
+    "回答必须是三段", 单问一句"有没有异常"它也要长篇大论。
+    """
+    rng = random.Random(seed)
+    by_img: dict[str, list[dict]] = {}
+    for r in rows:
+        by_img.setdefault((r.get("extra") or {}).get("image_id", ""), []).append(r)
+
+    out, n_chain = [], 0
+    for img, group in by_img.items():
+        def pick(pred):
+            return next((x for x in group
+                         if (x.get("extra") or {}).get("n_turns", 1) == 1 and pred(x.get("extra") or {})), None)
+
+        judge = pick(lambda e: e.get("gen") == "rule" and e.get("task") == "judge")
+        desc = pick(lambda e: e.get("facet") == "grounded")
+        why = pick(lambda e: e.get("task") == "reason")
+        parts = [x for x in (judge, desc, why) if x is not None]
+        if len(parts) < 2 or not img or rng.random() >= ratio:
+            out.extend(group)
+            continue
+
+        base = parts[0]
+        field = "videos" if "videos" in base else "images"
+        msgs = list(base["messages"][:3])                    # system + 第一问 + 第一答
+        for x in parts[1:]:
+            q = _strip_tok(x["messages"][-2]["content"])
+            msgs.append({"role": "user", "content": q})
+            msgs.append(dict(x["messages"][-1]))
+        merged = {
+            "messages": msgs, field: base[field],
+            "extra": {**base["extra"],
+                      "task": "+".join(
+                          [(x["extra"].get("facet") if x["extra"].get("gen") == "llm"
+                            else x["extra"].get("task")) for x in parts]),
+                      "gen": "rule+llm" if len({x["extra"].get("gen") for x in parts}) > 1
+                             else base["extra"].get("gen"),
+                      "n_turns": len(parts), "form": "chain"},
+        }
+        out.append(merged)
+        out.extend(x for x in group if x not in parts)       # 被拼进去的不再单独出现
+        n_chain += 1
+
+    if n_chain:
+        print(f"  拼成 {n_chain} 条'判定→带框描述→异常说明'的多轮链")
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="合并规则侧/LLM 侧产出并生成 dataset_info.json")
     ap.add_argument("--in", dest="inp", nargs="+", required=True)
     ap.add_argument("--out", default="data/vqa")
     ap.add_argument("--name", default="military_anomaly", help="dataset_info 里的条目名前缀")
     ap.add_argument("--ratios", default="0.8,0.1,0.1", help="LLM 侧未切分样本的落位比例")
+    ap.add_argument("--chain-ratio", type=float, default=0.30,
+                    help="有多少比例的图把'判定+带框描述+异常说明'拼成一条多轮对话, "
+                         "0 表示不拼")
+    ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
     out = Path(args.out)
@@ -61,6 +130,10 @@ def main() -> None:
         else:
             n_assigned += 1
         buckets[sp].append(row)
+
+    if args.chain_ratio > 0:
+        for sp in SPLITS:
+            buckets[sp] = compose_chains(buckets[sp], args.chain_ratio, args.seed)
 
     info: dict[str, dict] = {}
     tags = {"role_tag": "role", "content_tag": "content", "user_tag": "user",
