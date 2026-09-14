@@ -22,7 +22,8 @@ import random
 from pathlib import Path
 
 from derive_events import union_find_cluster
-from ds.common import clip_boxes_to_tile, parse_dota_txt, slice_image
+from ds.common import (clip_boxes_to_tile, image_size, open_large,
+                       parse_dota_txt, slice_image)
 from scene import Obj, Scene
 
 DATASET = "DOTA-v2.0"
@@ -90,6 +91,7 @@ def build(root: str, tiles_dir: str, tile: int = 1024, overlap: int = 200,
         raise RuntimeError(f"{DATASET}: 在 {img_dir} 下找不到图像")
 
     scenes, n_tiles, n_kept_empty, n_cluster_tiles = [], 0, 0, 0
+    failed: list[tuple[str, str]] = []
     for img in imgs:
         lab = lab_dir / f"{img.stem}.txt"
         raw: list[tuple[str, list[float]]] = []
@@ -102,16 +104,23 @@ def build(root: str, tiles_dir: str, tile: int = 1024, overlap: int = 200,
                     continue
                 raw.append((CLASS_MAP.get(key, key), bbox))
 
-        tiles = slice_image(img, tiles_dir, tile=tile, overlap=overlap)
+        # 单张图切片失败不能连累整批: DOTA 里混着 8 亿像素的巨图和破损文件,
+        # 让异常冒到顶上会把前面已经切好的几千张片子一起丢掉。
+        try:
+            tiles = slice_image(img, tiles_dir, tile=tile, overlap=overlap)
 
-        # 补上以簇为中心的切片, 防止规则网格把聚集切散
-        W, H = _orig_size(img)
-        grid_origins = {(t["x"], t["y"]) for t in tiles}
-        for x0, y0 in _cluster_tiles(raw, W, H, tile):
-            if (x0, y0) in grid_origins:
-                continue
-            tiles.extend(_crop_one(img, tiles_dir, x0, y0, tile, W, H))
-            n_cluster_tiles += 1
+            # 补上以簇为中心的切片, 防止规则网格把聚集切散
+            W, H = _orig_size(img)
+            grid_origins = {(t["x"], t["y"]) for t in tiles}
+            extra = [o for o in _cluster_tiles(raw, W, H, tile) if o not in grid_origins]
+            if extra:
+                # 一次打开切完所有簇中心块。原来是每块重新 open 一次 ——
+                # 对 8 亿像素的原图, 那等于每块都重解一遍 2.4 GB。
+                tiles.extend(_crop_many(img, tiles_dir, extra, tile, W, H))
+                n_cluster_tiles += len(extra)
+        except Exception as e:                        # noqa: BLE001
+            failed.append((img.name, f"{type(e).__name__}: {e}"))
+            continue
 
         for t in tiles:
             n_tiles += 1
@@ -133,24 +142,36 @@ def build(root: str, tiles_dir: str, tile: int = 1024, overlap: int = 200,
           f"(其中稀疏/空切片 {n_kept_empty}, 以簇为中心补切 {n_cluster_tiles})")
     print("  提示: DOTA 的 plane/ship 映射为 civil-plane/ship, 因此密集民用机群与"
           "港口会成为困难负样本, 这是预期行为")
+    if failed:
+        print(f"[warn] {DATASET}: {len(failed)} 张原图切片失败, 已跳过(其余照常产出):")
+        for name, why in failed[:5]:
+            print(f"         {name}  {why}")
+        if len(failed) > 5:
+            print(f"         ... 另有 {len(failed) - 5} 张")
     return scenes
 
 
 def _orig_size(img: Path) -> tuple[int, int]:
-    from PIL import Image
-    with Image.open(img) as im:
-        return im.size
+    return image_size(img)          # 读文件头, 超大图也不解码
 
 
-def _crop_one(img: Path, out_dir: str, x0: int, y0: int, tile: int,
-              W: int, H: int) -> list[dict]:
-    from PIL import Image
+def _crop_many(img: Path, out_dir: str, origins: list[tuple[int, int]], tile: int,
+               W: int, H: int) -> list[dict]:
+    """以给定原点批量切块。**只打开一次原图** —— DOTA-v2.0 的巨图解一次要几秒
+    和几 GB 内存, 每块重开一次会把这一张图的耗时乘上块数。"""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    x2, y2 = min(x0 + tile, W), min(y0 + tile, H)
-    dst = out / f"{img.stem}__c{x0}_{y0}{img.suffix}"
-    if not dst.exists():
-        with Image.open(img) as im:
-            im.crop((x0, y0, x2, y2)).save(dst)
-    return [{"path": str(dst), "x": x0, "y": y0, "w": x2 - x0, "h": y2 - y0,
-             "cluster_centered": True}]
+    made = []
+    todo = []
+    for x0, y0 in origins:
+        x2, y2 = min(x0 + tile, W), min(y0 + tile, H)
+        dst = out / f"{img.stem}__c{x0}_{y0}{img.suffix}"
+        made.append({"path": str(dst), "x": x0, "y": y0, "w": x2 - x0, "h": y2 - y0,
+                     "cluster_centered": True})
+        if not dst.exists():
+            todo.append((dst, (x0, y0, x2, y2)))
+    if todo:
+        with open_large(img) as im:
+            for dst, box in todo:
+                im.crop(box).save(dst)
+    return made

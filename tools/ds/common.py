@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
@@ -298,6 +299,43 @@ def parse_dota_txt(path: str | Path) -> list[tuple[str, list[float], int]]:
 
 
 # ---------------------------------------------------------------- 大图切片
+# ---------------------------------------------------------------- 超大遥感图
+def open_large(img_path: str | Path):
+    """打开可能很大的遥感图。DOTA-v2.0 里有 29200x27600(约 8 亿像素)的图。
+
+    PIL 默认在 1.79 亿像素处抛 DecompressionBombError —— 那是防"下载来的图片
+    是解压炸弹"用的, 而我们读的是自己磁盘上的数据集, 这个防护在这里只会误伤。
+    关掉它, 但换成我们自己的一道闸: 按可用内存算得起再解。
+    """
+    from PIL import Image
+    Image.MAX_IMAGE_PIXELS = None            # 我们自己判, 不用 PIL 的炸弹检测
+    return Image.open(img_path)
+
+
+MAX_SANE_SIDE = 100_000          # 边长超过这个数的只可能是坏文件, 不是大图
+
+
+def _avail_bytes() -> int:
+    try:
+        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (ValueError, OSError, AttributeError):
+        return 0
+
+
+def decode_affordable(w: int, h: int, budget: float = 0.5) -> tuple[bool, float]:
+    """解这张图大概要多少内存, 当前机器扛不扛得住。返回 (行不行, 需要多少 GB)。
+
+    估算按 RGB 3 字节 x 2.5 倍余量 —— PIL 解码时除了目标 buffer 还要中间缓冲,
+    切片时再多一份 crop 的拷贝。取不到可用内存信息(容器里常见)就放行,
+    真炸了也比凭一个猜出来的数字把整批数据拒之门外强。
+    """
+    need = w * h * 3 * 2.5
+    avail = _avail_bytes()
+    if avail <= 0:
+        return True, need / 2 ** 30
+    return need <= avail * budget, need / 2 ** 30
+
+
 def slice_image(img_path: str | Path, out_dir: str | Path, *, tile: int = 1024,
                 overlap: int = 200, min_content: float = 0.5) -> list[dict[str, Any]]:
     """把超大遥感图切成 tile x tile 的块。返回 [{path,x,y,w,h}]。
@@ -305,12 +343,24 @@ def slice_image(img_path: str | Path, out_dir: str | Path, *, tile: int = 1024,
     DOTA 原图可达 20000x20000, 不切片无法送入模型, 且小目标会被缩放到消失。
     min_content 过滤掉边缘那些大部分是空白填充的块。
     """
-    from PIL import Image
     img_path, out = Path(img_path), Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     step = max(1, tile - overlap)
     made = []
-    with Image.open(img_path) as im:
+    w0, h0 = image_size(img_path)            # 先读文件头, 不解码
+    if w0 and h0:
+        # 头部读出来大得离谱, 说明文件是坏的 —— 遥感图再大也不会有十万像素的边长。
+        # 不先挡一道的话, 下面会报一个"需要两百亿 GB 内存"的荒唐提示。
+        if max(w0, h0) > MAX_SANE_SIDE:
+            print(f"[warn] {img_path.name} 头部解出 {w0}x{h0}, 不是正常尺寸, "
+                  f"按损坏文件跳过")
+            return []
+        ok, need_gb = decode_affordable(w0, h0)
+        if not ok:
+            print(f"[warn] {img_path.name} {w0}x{h0} 需约 {need_gb:.1f} GB 内存才能解码, "
+                  f"当前可用内存不够, 跳过这一张(其余照切)")
+            return []
+    with open_large(img_path) as im:
         W, H = im.size
         if W <= tile and H <= tile:                  # 本来就不大, 直接拷一份记录
             dst = out / f"{img_path.stem}__0_0{img_path.suffix}"

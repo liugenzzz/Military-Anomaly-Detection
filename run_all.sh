@@ -55,6 +55,13 @@ resolve() {
   done
   return 1
 }
+# 已经跑出来的中间文件就别重跑。某一个数据集炸了(比如 DOTA 撞上巨图)时,
+# 补跑那一个即可, 不用把另外八个几万张图再走一遍。
+SKIP_PREPARED="${SKIP_PREPARED:-0}"
+prepared() {
+  [ "$SKIP_PREPARED" = "1" ] && [ -s "$1" ] && { echo "  [跳过] $(basename "$1") 已存在"; return 0; }
+  return 1
+}
 step() { echo; echo "──── $* ────"; }
 run()  { if "$@"; then return 0; else echo "  [失败] $*"; return 1; fi; }
 
@@ -63,24 +70,24 @@ echo "════ 0. 数据体检 ════"
 $PY tools/doctor.py --root "$DATA" || true
 
 step "1. 预处理"
-if D=$(resolve MAR20 mar20);           then run $PY tools/prepare.py mar20 --root "$D" --out "$OUT/interim/mar20.jsonl"; else SKIPPED+=("MAR20"); fi
-if D=$(resolve Mendeley-UAV-Military mendeley Mendeley); then run $PY tools/prepare.py mendeley --root "$D" --out "$OUT/interim/mendeley.jsonl"; else SKIPPED+=("Mendeley"); fi
-if D=$(resolve FASDD_UAV FASDD);       then run $PY tools/prepare.py fasdd --root "$D" --out "$OUT/interim/fasdd.jsonl"; else SKIPPED+=("FASDD_UAV(smoke 唯一来源)"); fi
+if D=$(resolve MAR20 mar20);           then prepared "$OUT/interim/mar20.jsonl" || run $PY tools/prepare.py mar20 --root "$D" --out "$OUT/interim/mar20.jsonl"; else SKIPPED+=("MAR20"); fi
+if D=$(resolve Mendeley-UAV-Military mendeley Mendeley); then prepared "$OUT/interim/mendeley.jsonl" || run $PY tools/prepare.py mendeley --root "$D" --out "$OUT/interim/mendeley.jsonl"; else SKIPPED+=("Mendeley"); fi
+if D=$(resolve FASDD_UAV FASDD);       then prepared "$OUT/interim/fasdd.jsonl" || run $PY tools/prepare.py fasdd --root "$D" --out "$OUT/interim/fasdd.jsonl"; else SKIPPED+=("FASDD_UAV(smoke 唯一来源)"); fi
 if D=$(resolve ERA era); then
   CAP=$(find "$DATA" -maxdepth 3 -iname '*.json' -ipath '*cap*' -print -quit 2>/dev/null)
-  run $PY tools/prepare.py era --root "$D" --modality video --single-frames \
+  prepared "$OUT/interim/era.jsonl" || run $PY tools/prepare.py era --root "$D" --modality video --single-frames \
       ${CAP:+--capera "$CAP"} --out "$OUT/interim/era.jsonl"
 else SKIPPED+=("ERA"); fi
-if D=$(resolve DroneCrowd dronecrowd); then run $PY tools/prepare.py dronecrowd --root "$D" --stride "$STRIDE_CROWD" --out "$OUT/interim/dronecrowd.jsonl"; else SKIPPED+=("DroneCrowd"); fi
+if D=$(resolve DroneCrowd dronecrowd); then prepared "$OUT/interim/dronecrowd.jsonl" || run $PY tools/prepare.py dronecrowd --root "$D" --stride "$STRIDE_CROWD" --out "$OUT/interim/dronecrowd.jsonl"; else SKIPPED+=("DroneCrowd"); fi
 if D=$(resolve VisDrone2019-DET-train VisDrone-DET VisDrone/VisDrone2019-DET-train); then
-  run $PY tools/prepare.py visdrone-det --root "$D" --out "$OUT/interim/vd_det.jsonl"
+  prepared "$OUT/interim/vd_det.jsonl" || run $PY tools/prepare.py visdrone-det --root "$D" --out "$OUT/interim/vd_det.jsonl"
 fi
 if D=$(resolve VisDrone2019-MOT-train VisDrone-MOT VisDrone/VisDrone2019-MOT-train); then
-  run $PY tools/prepare.py visdrone-mot --root "$D" --stride "$STRIDE_MOT" --out "$OUT/interim/vd_mot.jsonl"
+  prepared "$OUT/interim/vd_mot.jsonl" || run $PY tools/prepare.py visdrone-mot --root "$D" --stride "$STRIDE_MOT" --out "$OUT/interim/vd_mot.jsonl"
 fi
 [ -f "$OUT/interim/vd_mot.jsonl" ] || SKIPPED+=("VisDrone-MOT(border_crossing 唯一来源)")
-if D=$(resolve DOTA DOTA-v2.0 dota);   then run $PY tools/prepare.py dota --root "$D" --tiles-dir "$OUT/tiles/dota" --out "$OUT/interim/dota.jsonl"; else SKIPPED+=("DOTA"); fi
-if D=$(resolve Drone-Anomaly drone_anomaly); then run $PY tools/prepare.py drone-anomaly --root "$D" --stride "$STRIDE_DA" --out "$OUT/interim/drone_anomaly.jsonl"; else SKIPPED+=("Drone-Anomaly"); fi
+if D=$(resolve DOTA DOTA-v2.0 dota);   then prepared "$OUT/interim/dota.jsonl" || run $PY tools/prepare.py dota --root "$D" --tiles-dir "$OUT/tiles/dota" --out "$OUT/interim/dota.jsonl"; else SKIPPED+=("DOTA"); fi
+if D=$(resolve Drone-Anomaly drone_anomaly); then prepared "$OUT/interim/drone_anomaly.jsonl" || run $PY tools/prepare.py drone-anomaly --root "$D" --stride "$STRIDE_DA" --out "$OUT/interim/drone_anomaly.jsonl"; else SKIPPED+=("Drone-Anomaly"); fi
 
 shopt -s nullglob
 FILES=("$OUT"/interim/*.jsonl)

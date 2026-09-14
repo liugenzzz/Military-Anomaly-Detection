@@ -72,6 +72,7 @@ python tools/doctor.py --root /path/to/数据根目录   # 只体检: 看手上�
 | `FACETS_PER_IMAGE` | `4` | 每张图抽几个描述侧面（会被配额上调/下调） |
 | `INLINE_IMAGES` | `0` | 置 1 把图转 base64 内联。远端 API 需要；本地 vLLM 挂同一块盘就不用 |
 | `WORKERS` | `8` | 并发数 |
+| `SKIP_PREPARED` | `0` | 置 1 跳过已有中间文件。某个数据集失败后补跑它一个，不用把另外八个几万张图再走一遍 |
 
 配额两个方向都调：`explosion`/`smoke` 源数据富余，按 **image_id 分组**下采样（同图的几条
 QA 要么一起留要么一起丢，否则后面按组切 train/test 会串），`border_crossing` 这类源数据本来
