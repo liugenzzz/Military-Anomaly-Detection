@@ -170,7 +170,8 @@ EXPECTED = {
     "smoke": {"evidence", "position", "full", "grounded",
               "morphology", "color", "drift", "occlusion"},
     "border_crossing": {"evidence", "position", "full", "grounded",
-                        "trajectory", "timing", "boundary_relation", "group"},
+                        "trajectory", "timing", "boundary_relation", "group",
+                        "pace", "aftermath"},
     "normal": {"position", "full", "hard_neg", "scan"},
 }
 

@@ -33,6 +33,12 @@ COMPOSE_RATIO = 0.30            # 目标构成(哪几类各多少)
 COMPARE_RATIO = 0.25            # 左右/上下密度对比
 CORRECT_RATIO = 0.30            # 纠错题(给错误陈述让模型推翻)
 TEMPORAL_RATIO = 0.60           # 时序题。只有带轨迹的视频/多帧能出, 条件本就少, 配比给高
+# 越界专属三题。越界是四类里图最少的一类, 而它恰恰是信息最多的一类
+# (有轨迹、有界线、有方向), 配比给到最高, 把一张图的信息榨干
+CROSS_DIR_RATIO = 0.75
+CROSS_COUNT_RATIO = 0.70
+CROSS_NEG_RATIO = 0.35          # "有线但没人越线"的负样本。不给它, 模型会学成
+                                # "只要问到警戒线就答有越界"
 
 MEASURE = {"military-plane": "架", "civil-plane": "架", "plane": "架",
            "military-helicopter": "架", "civil-helicopter": "架", "helicopter": "架",
@@ -194,7 +200,15 @@ class RuleBuilder:
         msgs: list[dict] = [{"role": "system", "content": self.system}]
         field, paths = s.media
         tok = "<video>" if field == "videos" else "<image>"
+        # 越界类的问题必须自带警戒线前提 —— 线是虚拟的, 不写进问题, 模型无从判断。
+        # 但只挂在真的与线有关的题上: 判定题答的是集结, 前面顶一句警戒线纯属噪声,
+        # 还会让模型以为"凡是提到线的场合答案就该跟越界有关"。
+        about_line = task.startswith("cross_") or (
+            task.startswith(("judge", "locate")) and self._has_cross(s))
+        pre = self.boundary_premise(s) if about_line else ""
         for i, (q, a) in enumerate(turns):
+            if i == 0 and pre:
+                q = pre + q
             msgs.append({"role": "user",
                          "content": (tok * len(paths) + q) if i == 0 else q})
             msgs.append({"role": "assistant", "content": a})
@@ -475,6 +489,109 @@ class RuleBuilder:
             return "依据是逐项排查的结果：目标分布稀疏、无烟火迹象、无跨界移动，各项均未触发。"
         return None
 
+    # ---------------------------------------------- 越界专属题
+    @staticmethod
+    def _has_cross(s: Scene) -> bool:
+        return any(e.evidence.get("rule") == "boundary_cross" for e in s.events)
+
+    def cross_negative(self, s: Scene) -> tuple[str, str] | None:
+        """有警戒线、有活动目标、但**没人越线**。
+
+        这是越界这一类里最该有的样本: 不给它, 模型会学成"只要问到警戒线就答有越界"。
+        它天然是负样本, 而且数量管够 —— 序列里绝大多数帧本来就没有穿越发生。
+        """
+        if self._has_cross(s) or not s.regions or not s.tracks:
+            return None
+        n = len(s.tracks)
+        if n == 0:
+            return None
+        q = self._ask("cross_count")
+        return q, (f"没有目标越过这条线。画面中 {n} 个活动目标全程停留在线的同一侧，"
+                   f"各自的移动都未触及界线。")
+
+    def _cross_tracks(self, s: Scene) -> list[tuple[str, list[float], list[float]]]:
+        """越界目标的轨迹首尾点。(track_id, 起点, 终点)"""
+        out = []
+        for e in s.events:
+            if e.evidence.get("rule") != "boundary_cross":
+                continue
+            st, en = e.evidence.get("start"), e.evidence.get("end")
+            if st and en:
+                out.append((str(e.evidence.get("track_id")), list(st), list(en)))
+        return out
+
+    def cross_direction(self, s: Scene) -> tuple[str, str] | None:
+        """越界方向。**只说画面方位, 不说界内界外** ——
+        自动放置的是一条线, 线的两侧哪边算"内"根本无从判断, 硬说就是编。"""
+        tr = self._cross_tracks(s)
+        if not tr:
+            return None
+        dx = sum(e[0] - b[0] for _, b, e in tr) / len(tr)
+        dy = sum(e[1] - b[1] for _, b, e in tr) / len(tr)
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            return None
+        horiz = "自左向右" if dx > 0 else "自右向左"
+        vert = "自上而下" if dy > 0 else "自下而上"
+        if abs(dx) > 2.5 * abs(dy):
+            way = horiz
+        elif abs(dy) > 2.5 * abs(dx):
+            way = vert
+        else:
+            way = f"{horiz.replace('自', '自').replace('向', '偏')}{vert[1:]}"
+            way = f"{horiz}、同时{vert}"
+        who = CLS_ZH.get((s.events[0].evidence.get("cls") or ""), "目标")
+        n = len(tr)
+        tail = "，方向一致" if n > 1 and self._same_way(tr) else ""
+        return (self._ask("cross_direction"),
+                f"{n} 个{who}{way}穿过了界线{tail}。起始时位于界线一侧，"
+                f"结束时已越到另一侧。")
+
+    @staticmethod
+    def _same_way(tr) -> bool:
+        vs = [(e[0] - b[0], e[1] - b[1]) for _, b, e in tr]
+        ax = sum(v[0] for v in vs) / len(vs)
+        ay = sum(v[1] for v in vs) / len(vs)
+        return all(v[0] * ax + v[1] * ay > 0 for v in vs)
+
+    def cross_count(self, s: Scene) -> tuple[str, str] | None:
+        """越界计数。同时报"没越的那些" —— 只问越界数, 模型会学成
+        "画面里有几个动的就答几个"。"""
+        tr = self._cross_tracks(s)
+        if not tr:
+            return None
+        n_cross = len({t[0] for t in tr})
+        n_total = len(s.tracks) or len({o.track_id for o in s.objects if o.track_id is not None})
+        rest = max(0, n_total - n_cross)
+        q = self._ask("cross_count")
+        if rest:
+            return q, (f"{n_cross} 个目标越过了界线；另有 {rest} 个目标"
+                       f"全程停留在界线同一侧，未构成越界。")
+        return q, f"{n_cross} 个目标越过了界线，画面中的活动目标全部发生了越界。"
+
+    def boundary_premise(self, s: Scene) -> str:
+        """把虚拟警戒线**写进问题里**。
+
+        这条线是我们自己画的, 图上根本不存在。原先直接问"有几个目标越过了界线",
+        等于要模型对一个它看不见的前提作答 —— 那不是在教它看图, 是在教它猜。
+        真实的周界告警系统也是这么工作的: 线由系统给定, 模型判断的是"有没有跨过它"。
+        """
+        reg = next((r for r in s.regions if len(r.points) >= 2), None)
+        if reg is None:
+            return ""
+        (x1, y1), (x2, y2) = reg.points[0], reg.points[-1]
+        dx, dy = x2 - x1, y2 - y1
+        if abs(dx) > 2.5 * abs(dy):
+            shape = "近似水平横贯画面"
+        elif abs(dy) > 2.5 * abs(dx):
+            shape = "近似垂直纵贯画面"
+        else:
+            shape = "自左上向右下斜贯画面" if dx * dy > 0 else "自左下向右上斜贯画面"
+        mx = (max(0.0, min(s.width, x1)) + max(0.0, min(s.width, x2))) / 2
+        my = (max(0.0, min(s.height, y1)) + max(0.0, min(s.height, y2))) / 2
+        where = _zone(mx / max(1, s.width), my / max(1, s.height))
+        return f"设有一条{shape}、经过{where}的虚拟警戒线。"
+
+
     # -------------------------------------------------- 组装
     def build(self, s: Scene) -> list[dict]:
         out: list[dict] = []
@@ -517,6 +634,15 @@ class RuleBuilder:
                                 (COMPARE_RATIO, self.compare, "compare"),
                                 (CORRECT_RATIO, self.correct, "correct"),
                                 (TEMPORAL_RATIO, self.temporal, "temporal")):
+            if r.random() < ratio and (t := fn(s)):
+                out.append(self._mk(s, [t], name))
+
+        # 越界专属题。这一类的图最少, 但一张图能问的东西不止"有没有异常":
+        # 方向、越了几个没越几个、界线怎么走, 答案全由轨迹和界线唯一决定,
+        # 零成本零幻觉 —— 比在同一批画面上多生成几段描述划算得多。
+        for ratio, fn, name in ((CROSS_DIR_RATIO, self.cross_direction, "cross_direction"),
+                                (CROSS_COUNT_RATIO, self.cross_count, "cross_count"),
+                                (CROSS_NEG_RATIO, self.cross_negative, "cross_negative")):
             if r.random() < ratio and (t := fn(s)):
                 out.append(self._mk(s, [t], name))
 
@@ -634,14 +760,32 @@ def apply_quota(samples: list[dict], target: int, seed: int = 0,
     for cls, before, after, q in sorted(report, key=lambda r: -r[1]):
         tgt = target if cls != "normal" else int(target * len(by_cls) * 3 / 7)
         cov = final.get(cls, 0)
-        note = (f"✅ 从 {before} 择优保留(平均质量分 {q:.2f})" if before > after else "✅")
-        if cov < tgt * 0.8:
-            note = f"❌ 缺口 {tgt - cov}"
+        if before > after:
+            note = f"✅ 从 {before} 择优保留(平均质量分 {q:.2f})"
+        elif cov < tgt * 0.8:
+            # 把"配额砍下来的"和"数据本来就这么多"分开说。
+            # 后者不叫缺口 —— 该类可用的样本已经一条不剩地留下了, 再报缺口只会
+            # 让人去想办法凑数, 而凑数只能靠在同一批画面上反复出题。
+            note = f"⚠ 数据见底(该类可用样本已全部保留)"
+        else:
+            note = "✅"
         print(f"  {cls:20s} 归属 {after:7d}  覆盖 {cov:7d} / 目标 {tgt:6d}  {note}")
     multi = sum(1 for s in out if len(s["extra"]["anomaly"]) > 1)
     if multi:
         print(f"  其中 {multi} 条同时属于多个异常类(如烟雾与爆炸同框), "
               f"已归到最稀缺的那一类, 覆盖列里两类都计入")
+
+    # 真正该盯的不是绝对条数, 是类间比例。差到 3:1 以上, 少的那类会学不动;
+    # 2:1 上下属于正常波动, 不值得为它去复制样本。
+    anom = {c: n for c, n in final.items() if c != "normal"}
+    if len(anom) >= 2:
+        hi, lo = max(anom.items(), key=lambda kv: kv[1]), min(anom.items(), key=lambda kv: kv[1])
+        ratio = hi[1] / max(1, lo[1])
+        verdict = ("✅ 均衡" if ratio <= 2 else
+                   "✅ 轻微不均, 不影响训练" if ratio <= 3 else
+                   "⚠ 偏斜明显, 建议训练时对少的那类加采样权重")
+        print(f"  类间比例: 最多 {hi[0]} {hi[1]} / 最少 {lo[0]} {lo[1]} = "
+              f"{ratio:.1f}:1  {verdict}")
     return out
 
 

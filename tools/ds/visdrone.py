@@ -173,7 +173,8 @@ def _parse_boundaries(path: str | None) -> dict[str, list[list[float]]]:
 
 # ---------------------------------------------------------------- MOT
 def build_mot(root: str, stride: int = 30, boundaries: str | None = None,
-              auto: bool = True, view: str = "uav", n_boundaries: int = 3) -> list[Scene]:
+              auto: bool = True, view: str = "uav", n_boundaries: int = 3,
+              n_frames: int = 3) -> list[Scene]:
     """MOT 标注: <frame,target_id,x,y,w,h,score,category,truncation,occlusion>"""
     r = Path(root)
     seq_root = next((d for d in (r / "sequences", r) if d.is_dir()), r)
@@ -265,19 +266,39 @@ def build_mot(root: str, stride: int = 30, boundaries: str | None = None,
                           (k // max(1, stride)) % len(lines))
                 region = Region(name=f"restricted_{seq.name}_{bi}", type="polyline",
                                 points=lines[bi])
-            img = seq / f"{k:07d}.jpg"
-            if not img.exists():
-                idx = frames.index(k)
-                img = imgs[min(idx, len(imgs) - 1)]
+            def _frame_path(fi: int) -> str:
+                q = seq / f"{fi:07d}.jpg"
+                if q.exists():
+                    return str(q)
+                idx = frames.index(fi) if fi in frames else 0
+                return str(imgs[min(idx, len(imgs) - 1)])
+
+            # **越界必须给多帧**。单帧里既看不见运动, 也看不见我们自己画的那条虚拟线,
+            # 却要模型答"有几个目标越过了界线" —— 那是在教它瞎猜。
+            # 取穿越窗口的前/中/后若干帧, 跨越这件事才真的落在画面上。
+            span = [f for f in (k - half, k, k + half) if f in by_frame] or [k]
+            while len(span) < n_frames and len(span) < len(frames):
+                nxt = [f for f in frames if f not in span
+                       and abs(f - k) <= half * 2]
+                if not nxt:
+                    break
+                span.append(min(nxt, key=lambda f: abs(f - k)))
+            span = sorted(set(span))[:n_frames]
+            paths = [_frame_path(f) for f in span]
+            img = Path(paths[len(paths) // 2])          # 中间那帧代表本样本, 供质检与去重
+
             scenes.append(Scene(
                 image_id=f"{DATASET_MOT}_{split}_{seq.name}_frame{k:07d}", image_path=str(img),
+                modality="multi_image" if len(paths) > 1 else "image",
+                frames=paths if len(paths) > 1 else [],
                 width=W, height=H, source_dataset=DATASET_MOT, license=LICENSE, view=view,
                 objects=objs, regions=[region] if region else [], tracks=tracks,
                 meta={"sequence": seq.name, "split": split, "frame_idx": k,
                       "boundary_source": ("manual" if seq.name in manual
                                           else ("auto" if lines else "none"))}))
 
-    print(f"[{DATASET_MOT}] {len(scenes)} 帧(stride={stride}), 自动放置边界 {n_auto} 条"
+    print(f"[{DATASET_MOT}] {len(scenes)} 个样本(每个 {n_frames} 帧, stride={stride}), "
+          f"自动放置边界 {n_auto} 条"
           f"(每序列 {n_boundaries} 条), 人工边界 {len(manual)} 条")
     if n_auto:
         print("  自动边界 = 垂直于平均运动方向、过轨迹中心的直线。"

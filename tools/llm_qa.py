@@ -45,6 +45,8 @@ FACET_WEIGHTS = {
     "intensity": 18, "debris": 18, "extent": 15, "stage": 12,
     "morphology": 18, "color": 18, "drift": 15, "occlusion": 12,
     "trajectory": 18, "timing": 18, "boundary_relation": 15, "group": 12,
+    # 越界这一类的图最少, 但它的信息最多(有轨迹、有方向、有前后段), 多开两个侧面
+    "pace": 14, "aftermath": 14,
     "hard_neg": 40, "scan": 30,
     # 带框描述: 训练要求里"多模态描述(文字+图像区域)"直接对应这一类, 权重给到最高
     "grounded": 30,
@@ -57,7 +59,10 @@ def facet_applicable(kind: str, s: Scene) -> bool:
     """needs 前置条件的机器可判部分。判不了的交给模型自己返回空。"""
     ev = {e.type: e for e in s.events}
     cluster = next((e for e in s.events if "cluster_bbox" in e.evidence), None)
-    n_frames = len(s.meta.get("frames", [])) or 1
+    # 帧在 s.frames 里, 不在 meta 里。读错地方的后果是 n_frames 恒为 1,
+    # 于是 trajectory / timing 这两个越界专属侧面从来没触发过 ——
+    # 越界本来就是图最少的一类, 四个专属侧面还被静默砍掉两个。
+    n_frames = len(s.frames) or (len(s.media[1]) if s.modality != "image" else 1)
     crossed = [e for e in s.events if e.evidence.get("rule") == "boundary_cross"]
     return {
         "formation": bool(cluster and cluster.evidence.get("count", 0) >= 6),
@@ -76,6 +81,8 @@ def facet_applicable(kind: str, s: Scene) -> bool:
         "timing": n_frames > 1 and bool(crossed),
         "boundary_relation": bool(crossed) and bool(s.regions),
         "group": len(crossed) >= 2,
+        "pace": bool(crossed) and n_frames > 1,
+        "aftermath": bool(crossed) and n_frames > 1,
         "hard_neg": bool(s.meta.get("hard_negative")),
         "scan": not s.events,
         "evidence": bool(s.events),
@@ -360,7 +367,7 @@ def _pick_facets(s: Scene, facets: dict[str, list[Facet]], anomaly: str,
     return picked
 
 
-MAX_FACETS_PER_IMAGE = 6   # 侧面池最多 6 个(3 通用 + 4 专属, 再减去至少留一个不抽)
+MAX_FACETS_PER_IMAGE = 8   # 越界类补了两个侧面后池子到 9 个   # 侧面池最多 6 个(3 通用 + 4 专属, 再减去至少留一个不抽)
 
 
 def _pool_size(s: Scene, facets: dict[str, list[Facet]], anomaly: str) -> int:
@@ -446,8 +453,21 @@ def plan_quota(scenes: list[Scene], facets: dict[str, list[Facet]], target: int,
 
     print("\n按类别配额(LLM 描述侧):")
     for cls, n, k, est, tgt in sorted(report, key=lambda r: -r[3]):
-        flag = "✅" if est >= tgt * 0.8 else f"❌ 缺口 {tgt - est}"
+        # 侧面数已经顶到池子上限还不够, 说明是这一类的图就这么多, 不是配额砍的
+        flag = ("✅" if est >= tgt * 0.8 else
+                "⚠ 数据见底(每图侧面已抽满)" if k >= MAX_FACETS_PER_IMAGE else
+                f"⚠ 差 {tgt - est}")
         print(f"  {cls:18s} scene {n:6d} × {k} 侧面 ≈ {est:7d} 条 / 目标 {tgt:6d}  {flag}")
+    anom = {c: e for c, _, _, e, _ in
+            ((r[0], r[1], r[2], r[3], r[4]) for r in report) if c != "normal"}
+    if len(anom) >= 2:
+        hi, lo = max(anom.items(), key=lambda kv: kv[1]), min(anom.items(), key=lambda kv: kv[1])
+        ratio = hi[1] / max(1, lo[1])
+        verdict = ("✅ 均衡" if ratio <= 2 else
+                   "✅ 轻微不均, 不影响训练" if ratio <= 3 else
+                   "⚠ 偏斜明显, 建议训练时对少的那类加采样权重")
+        print(f"  类间比例: 最多 {hi[0]} {hi[1]} / 最少 {lo[0]} {lo[1]} = "
+              f"{ratio:.1f}:1  {verdict}")
     return plan
 
 
