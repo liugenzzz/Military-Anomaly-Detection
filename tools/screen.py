@@ -129,9 +129,16 @@ def hamming(a: int, b: int) -> int:
 # 而它是 smoke 的唯一来源。
 FRAME_SOURCES = {"DroneCrowd", "VisDrone2019-MOT", "Drone-Anomaly", "ERA", "HIVAU-70k"}
 DHASH_THRESHOLD_STATIC = 2
+# 目标在动的抽帧来源用中间档。DroneCrowd 是悬停拍人群, 隔 8 帧几乎不变, 该狠判;
+# MOT 序列里车在跑、镜头在移, 隔几帧画面真的不同, 按 5 判会把有效帧大量误杀 ——
+# 而越界是四类里唯一缺口大的一类, 这些帧丢不起。
+MOVING_SOURCES = {"VisDrone2019-MOT"}
+DHASH_THRESHOLD_MOVING = 3
 
 
 def _threshold_of(scene: Scene, seq_th: int, static_th: int) -> int:
+    if scene.source_dataset in MOVING_SOURCES:
+        return DHASH_THRESHOLD_MOVING
     if scene.source_dataset in FRAME_SOURCES or scene.modality in ("video", "multi_image"):
         return seq_th
     return static_th

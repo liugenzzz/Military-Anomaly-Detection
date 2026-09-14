@@ -29,12 +29,12 @@ RELAX_BELOW="${RELAX_BELOW:-3000}"         # 产量低于这么多张图的类�
 # 抽帧间隔。与 configs/ontology.yaml 的 stride 保持一致: 30 对 DroneCrowd 和
 # VisDrone-MOT 太稀(24960 帧只取 832), 近重复由 screen.py 的闸3 兜底。
 STRIDE_CROWD="${STRIDE_CROWD:-8}"
-STRIDE_MOT="${STRIDE_MOT:-8}"
+STRIDE_MOT="${STRIDE_MOT:-4}"   # 越界类的帧数就是它的产量上限, 比别的源抽得密一点
 # 每个 MOT 序列铺几条平行边界线。只铺一条的话, 一个序列里只有中间几帧算越界,
 # border_crossing 的产量就卡在那; 铺开之后不同的帧被不同的线截住, 同一段素材
 # 产出的是**不同的**问答(越界目标、时机、方向都不同)。但图还是那些图,
 # 调太高只是在同一批画面上反复出题, 别超过 5。
-MOT_BOUNDARIES="${MOT_BOUNDARIES:-3}"
+MOT_BOUNDARIES="${MOT_BOUNDARIES:-4}"
 STRIDE_DA="${STRIDE_DA:-10}"
 # 媒体归集: 填了就把引用到的图片/视频硬链到语料库目录, 并把 json 里的路径改过去
 #   MEDIA_ROOT=/mnt/si003010kcx0/mmdata/data_process/corpus_media
@@ -93,10 +93,18 @@ if D=$(resolve DroneCrowd dronecrowd); then prepared "$OUT/interim/dronecrowd.js
 if D=$(resolve VisDrone2019-DET-train VisDrone-DET VisDrone/VisDrone2019-DET-train); then
   prepared "$OUT/interim/vd_det.jsonl" || run $PY tools/prepare.py visdrone-det --root "$D" --out "$OUT/interim/vd_det.jsonl"
 fi
-if D=$(resolve VisDrone2019-MOT-train VisDrone-MOT VisDrone/VisDrone2019-MOT-train); then
-  prepared "$OUT/interim/vd_mot.jsonl" || run $PY tools/prepare.py visdrone-mot --root "$D" --stride "$STRIDE_MOT" --boundaries-per-seq "$MOT_BOUNDARIES" --out "$OUT/interim/vd_mot.jsonl"
-fi
-[ -f "$OUT/interim/vd_mot.jsonl" ] || SKIPPED+=("VisDrone-MOT(border_crossing 唯一来源)")
+# MOT 的 train / val / test-dev 都收。越界是四类里唯一缺口大的, 而它只有这一个
+# 数据源 —— 与其在同一批画面上反复出题, 不如先把同数据集其他 split 的真实素材用上。
+# 这些 split 只是 VisDrone 官方的划分, 与我们自己的 train/test 切分无关。
+N_MOT=0
+for SPLIT in train val test-dev; do
+  D=$(resolve "VisDrone2019-MOT-$SPLIT" "VisDrone-MOT-$SPLIT" "VisDrone/VisDrone2019-MOT-$SPLIT") || continue
+  OUTF="$OUT/interim/vd_mot_${SPLIT/-/}.jsonl"
+  prepared "$OUTF" || run $PY tools/prepare.py visdrone-mot --root "$D" --stride "$STRIDE_MOT" \
+      --boundaries-per-seq "$MOT_BOUNDARIES" --out "$OUTF"
+  N_MOT=$((N_MOT + 1))
+done
+[ "$N_MOT" -gt 0 ] || SKIPPED+=("VisDrone-MOT(border_crossing 唯一来源)")
 if D=$(resolve DOTA DOTA-v2.0 dota);   then prepared "$OUT/interim/dota.jsonl" || run $PY tools/prepare.py dota --root "$D" --tiles-dir "$OUT/tiles/dota" --out "$OUT/interim/dota.jsonl"; else SKIPPED+=("DOTA"); fi
 if D=$(resolve Drone-Anomaly drone_anomaly); then prepared "$OUT/interim/drone_anomaly.jsonl" || run $PY tools/prepare.py drone-anomaly --root "$D" --stride "$STRIDE_DA" --out "$OUT/interim/drone_anomaly.jsonl"; else SKIPPED+=("Drone-Anomaly"); fi
 
@@ -105,7 +113,8 @@ shopt -s nullglob
 # interim/ 下还躺着历史 demo 数据和 llm_requests.jsonl(那是请求不是 scene),
 # 通配会把它们一起 cat 进去: 上一轮就混进了 40 条 DEMO-synthetic, 还制造了
 # 两千多个 duplicate_scene_id。
-INTERIM_FILES=(mar20 mendeley fasdd era dronecrowd vd_det vd_mot dota drone_anomaly)
+INTERIM_FILES=(mar20 mendeley fasdd era dronecrowd vd_det
+                vd_mot_train vd_mot_val vd_mot_testdev dota drone_anomaly)
 FILES=()
 for n in "${INTERIM_FILES[@]}"; do
   f="$OUT/interim/$n.jsonl"

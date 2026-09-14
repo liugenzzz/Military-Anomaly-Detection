@@ -61,6 +61,9 @@ def main() -> None:
     ap.add_argument("--out-dir", default=None,
                     help="改写后的 json 落在哪; 不填就原地覆盖")
     ap.add_argument("--dry-run", action="store_true", help="只统计, 不动文件")
+    ap.add_argument("--prune", action="store_true",
+                    help="删掉语料库里已经没被任何 json 引用的文件。重跑过几轮之后, "
+                         "上一版产出的媒体还留在那儿, 是纯占地方的孤儿")
     args = ap.parse_args()
 
     root = Path(args.media_root) / args.name
@@ -106,6 +109,22 @@ def main() -> None:
                 outp.write_text(json.dumps(data, ensure_ascii=False, indent=1),
                                 encoding="utf-8")
             print(f"  {jf}  {len(data)} 条")
+
+    # 孤儿文件: 语料库里有、但这批 json 一条都没引用的。总是报一下, 删不删另说。
+    if root.is_dir():
+        referenced = {Path(v).resolve() for v in mapping.values()}
+        orphans = [f for f in root.rglob("*")
+                   if f.is_file() and f.resolve() not in referenced]
+        if orphans:
+            size = sum(f.stat().st_size for f in orphans) // 2 ** 20
+            print(f"\n语料库里有 {len(orphans)} 个文件没被这批 json 引用 ({size} MB), "
+                  f"多半是上几轮跑出来的旧版本")
+            if args.prune and not args.dry_run:
+                for f in orphans:
+                    f.unlink()
+                print(f"  已删除(--prune)")
+            else:
+                print(f"  要清理就加 --prune; 不加就原样留着, 不影响训练")
 
     print(f"\n媒体根目录: {root}")
     print(f"  images/  videos/  两个二级目录, 其下按数据源分目录")

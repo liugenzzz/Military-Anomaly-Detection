@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -178,6 +179,11 @@ def build_mot(root: str, stride: int = 30, boundaries: str | None = None,
     seq_root = next((d for d in (r / "sequences", r) if d.is_dir()), r)
     ann_root = next((d for d in (r / "annotations", r) if d.is_dir()), r)
     manual = _parse_boundaries(boundaries)
+    # 把 split 写进 image_id。VisDrone 官方的 train/val/test-dev 序列名本来就不重样,
+    # 但三个 split 一起收的时候, 万一撞名就是"重复 image_id"被静默剔除一半,
+    # 加个前缀是很便宜的保险。
+    split = re.sub(r"^VisDrone\d*-?MOT-?", "", r.name, flags=re.I).strip("-_") or "main"
+    split = re.sub(r"[^A-Za-z0-9]", "", split).lower()
 
     seq_dirs = sorted(d for d in seq_root.iterdir() if d.is_dir()) or [seq_root]
     scenes, n_auto = [], 0
@@ -264,10 +270,10 @@ def build_mot(root: str, stride: int = 30, boundaries: str | None = None,
                 idx = frames.index(k)
                 img = imgs[min(idx, len(imgs) - 1)]
             scenes.append(Scene(
-                image_id=f"{DATASET_MOT}_{seq.name}_frame{k:07d}", image_path=str(img),
+                image_id=f"{DATASET_MOT}_{split}_{seq.name}_frame{k:07d}", image_path=str(img),
                 width=W, height=H, source_dataset=DATASET_MOT, license=LICENSE, view=view,
                 objects=objs, regions=[region] if region else [], tracks=tracks,
-                meta={"sequence": seq.name, "frame_idx": k,
+                meta={"sequence": seq.name, "split": split, "frame_idx": k,
                       "boundary_source": ("manual" if seq.name in manual
                                           else ("auto" if lines else "none"))}))
 
