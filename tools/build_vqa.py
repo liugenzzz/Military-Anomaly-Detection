@@ -573,9 +573,19 @@ def apply_quota(samples: list[dict], target: int, seed: int = 0,
     if target <= 0:
         return samples
     quality = quality or {}
+
+    # 按"每个异常类实际出现多少次"统计, 再把同时属于多类的样本归到其中最稀缺的一类。
+    # 不能拿 "+".join 当类名: 上一轮 explosion+smoke 被当成了独立类别, 于是报告里
+    # explosion 只有 282 条、缺口 9718, 而实际上另外 8557 条 explosion+smoke 里
+    # 每一条都是 explosion —— 按假类名配额, 既把缺口报错, 也会把该留的样本丢掉。
+    total: dict[str, int] = {}
+    for s in samples:
+        for c in s["extra"]["anomaly"]:
+            total[c] = total.get(c, 0) + 1
     by_cls: dict[str, list[dict]] = {}
     for s in samples:
-        by_cls.setdefault("+".join(s["extra"]["anomaly"]), []).append(s)
+        cls = min(s["extra"]["anomaly"], key=lambda c: (total.get(c, 0), c))
+        by_cls.setdefault(cls, []).append(s)
 
     rng = random.Random(seed)
     out: list[dict] = []
@@ -614,16 +624,24 @@ def apply_quota(samples: list[dict], target: int, seed: int = 0,
         report.append((cls, len(group), len(kept),
                        sum(picked_q) / max(1, len(picked_q))))
 
-    print("\n按类别配额(规则侧):")
+    # 最终每个异常类实际覆盖多少条(同时属于多类的样本, 每一类都算它一次)
+    final: dict[str, int] = {}
+    for s in out:
+        for c in s["extra"]["anomaly"]:
+            final[c] = final.get(c, 0) + 1
+
+    print("\n按类别配额(规则侧)。归属列 = 归到本类名下的条数, 覆盖列 = 含本类的全部条数:")
     for cls, before, after, q in sorted(report, key=lambda r: -r[1]):
         tgt = target if cls != "normal" else int(target * len(by_cls) * 3 / 7)
-        if after < tgt * 0.8:
-            print(f"  {cls:22s} {after:7d} / 目标 {tgt}   ❌ 缺口 {tgt - after}")
-        elif before > after:
-            print(f"  {cls:22s} {after:7d} / 目标 {tgt}   ✅ 从 {before} 择优保留"
-                  f"(留下的平均质量分 {q:.2f})")
-        else:
-            print(f"  {cls:22s} {after:7d} / 目标 {tgt}   ✅")
+        cov = final.get(cls, 0)
+        note = (f"✅ 从 {before} 择优保留(平均质量分 {q:.2f})" if before > after else "✅")
+        if cov < tgt * 0.8:
+            note = f"❌ 缺口 {tgt - cov}"
+        print(f"  {cls:20s} 归属 {after:7d}  覆盖 {cov:7d} / 目标 {tgt:6d}  {note}")
+    multi = sum(1 for s in out if len(s["extra"]["anomaly"]) > 1)
+    if multi:
+        print(f"  其中 {multi} 条同时属于多个异常类(如烟雾与爆炸同框), "
+              f"已归到最稀缺的那一类, 覆盖列里两类都计入")
     return out
 
 

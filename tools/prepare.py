@@ -114,6 +114,9 @@ def main() -> None:
     p.add_argument("--stride", type=int, default=8)
     p.add_argument("--boundaries", default=None, help='人工边界 json: {"序列名": [[x,y],...]}')
     p.add_argument("--no-auto-boundary", action="store_true")
+    p.add_argument("--boundaries-per-seq", type=int, default=3,
+                   help="每个序列自动铺几条平行边界线。只铺一条时, 一个序列里只有"
+                        "中间几帧算越界, 这是 border_crossing 产量上不去的主因")
     p.add_argument("--view", default="uav")
     add_out(p)
 
@@ -182,7 +185,7 @@ def main() -> None:
         scenes = visdrone.build_det(a.root, a.view)
     elif a.cmd == "visdrone-mot":
         scenes = visdrone.build_mot(a.root, a.stride, a.boundaries,
-                                    auto=not a.no_auto_boundary, view=a.view)
+                                    auto=not a.no_auto_boundary, view=a.view, n_boundaries=a.boundaries_per_seq)
     elif a.cmd == "dota":
         scenes = dota.build(a.root, a.tiles_dir, a.tile, a.overlap, a.min_objects,
                             a.empty_ratio, a.seed, a.view)

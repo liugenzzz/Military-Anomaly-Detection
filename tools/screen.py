@@ -124,8 +124,22 @@ def hamming(a: int, b: int) -> int:
     return bin(a ^ b).count("1")
 
 
+# 抽帧来源: 相邻帧天然相似, 该用宽松阈值。独立静态图数据集则要严, 否则
+# FASDD 这种整体灰白、纹理弱的烟雾图会大面积撞 dhash —— 上一轮它只留下 23%,
+# 而它是 smoke 的唯一来源。
+FRAME_SOURCES = {"DroneCrowd", "VisDrone2019-MOT", "Drone-Anomaly", "ERA", "HIVAU-70k"}
+DHASH_THRESHOLD_STATIC = 2
+
+
+def _threshold_of(scene: Scene, seq_th: int, static_th: int) -> int:
+    if scene.source_dataset in FRAME_SOURCES or scene.modality in ("video", "multi_image"):
+        return seq_th
+    return static_th
+
+
 def gate3_dedup(items: list[tuple[Scene, dict[str, Any] | None]],
-                threshold: int = DHASH_THRESHOLD) -> set[int]:
+                threshold: int = DHASH_THRESHOLD,
+                static_threshold: int = DHASH_THRESHOLD_STATIC) -> set[int]:
     """跨数据集统一去重, 返回应丢弃的**下标**集合。同簇保留最清晰的一张。
 
     返回下标而非 image_id: 按 id 记录时, 若两个 scene 共享同一个 id, 会把本该
@@ -145,8 +159,12 @@ def gate3_dedup(items: list[tuple[Scene, dict[str, Any] | None]],
             if i in used:
                 continue
             cluster = [i]
+            th_i = _threshold_of(items[i][0], threshold, static_threshold)
             for j in idxs[a + 1:]:
-                if j not in used and hamming(items[i][1]["dhash"], items[j][1]["dhash"]) <= threshold:
+                # 两张图各自的阈值取小的那个: 一张来自抽帧、一张是独立静态图时,
+                # 按宽松的那个判会把静态图误杀
+                th = min(th_i, _threshold_of(items[j][0], threshold, static_threshold))
+                if j not in used and hamming(items[i][1]["dhash"], items[j][1]["dhash"]) <= th:
                     cluster.append(j)
                     used.add(j)
             if len(cluster) > 1:
@@ -204,7 +222,11 @@ def main() -> None:
     ap.add_argument("--vlm-review", default=None, help="闸5 结果 jsonl, 每行 {image_id, view, consistent, score, watermark}")
     ap.add_argument("--min-vlm-score", type=int, default=3)
     ap.add_argument("--no-dedup", action="store_true")
-    ap.add_argument("--dedup-threshold", type=int, default=DHASH_THRESHOLD)
+    ap.add_argument("--dedup-threshold", type=int, default=DHASH_THRESHOLD,
+                    help="抽帧来源的近重复阈值(dhash 汉明距离)")
+    ap.add_argument("--dedup-threshold-static", type=int, default=DHASH_THRESHOLD_STATIC,
+                    help="独立静态图数据集的近重复阈值。静态图之间本就不该相似, "
+                         "阈值放宽会把大量不同的图判成重复")
     args = ap.parse_args()
 
     onto = yaml.safe_load(Path(args.ontology).read_text(encoding="utf-8"))
@@ -273,7 +295,7 @@ def main() -> None:
             staged.append((s, st))
 
     if not args.no_dedup:
-        dup = gate3_dedup(staged, args.dedup_threshold)
+        dup = gate3_dedup(staged, args.dedup_threshold, args.dedup_threshold_static)
         for i, (s, _) in enumerate(staged):
             if i in dup:
                 s.meta["drop_reason"] = "near_duplicate"
@@ -281,9 +303,14 @@ def main() -> None:
                 dropped.append(s)
             else:
                 kept.append(s)
+        if dup:
+            by_src_dup = Counter(staged[i][0].source_dataset for i in dup)
+            print("  近重复剔除按数据集:", ", ".join(
+                f"{k} {v}" for k, v in by_src_dup.most_common(6)))
         if staged and len(dup) / len(staged) > 0.30:
-            print(f"[warn] 近重复剔除率 {len(dup) / len(staged):.0%} 偏高。抽帧数据本就多近重复"
-                  f"属正常; 若整图数据集也如此, 请调大 --dedup-threshold 或核对是否重复合并")
+            print(f"[warn] 近重复剔除率 {len(dup) / len(staged):.0%} 偏高。抽帧数据本就多近重复, "
+                  f"属正常; 若独立静态图的数据集也被大量剔除, 先核对是不是同一批图被合并了两次, "
+                  f"确认不是重复合并再把 --dedup-threshold-static 调到 1")
     else:
         kept = [s for s, _ in staged]
 

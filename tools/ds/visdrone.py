@@ -99,6 +99,69 @@ def auto_boundary(tracks: dict[str, list[list[float]]], W: int, H: int) -> list[
     return [[cx - px * L, cy - py * L], [cx + px * L, cy + py * L]]
 
 
+def auto_boundaries(tracks: dict[str, list[list[float]]], W: int, H: int,
+                    n: int) -> list[list[list[float]]]:
+    """沿运动方向铺 n 条平行边界线。
+
+    只画一条线(过轨迹中心)时, 一个序列里只有中间那几帧算得上越界, 其余全是负样本
+    —— 这正是 border_crossing 产量上不去的根本原因: 24201 帧只换来两千多条 QA。
+    沿运动方向把线铺开, 不同的帧会被不同的线截住, 同一段素材因此能产出**不同的**
+    问答(越界目标不同、时机不同、方向不同), 而不是同一条答案复制 n 遍。
+
+    这不是凭空造数据: 每条线都是一条同样合理的"禁区边界", 答案仍由真实轨迹算出。
+    """
+    if n <= 1:
+        return [auto_boundary(tracks, W, H)]
+    segs = [(p[0], p[-1]) for p in tracks.values() if len(p) >= 2]
+    if not segs:
+        return [auto_boundary(tracks, W, H)]
+
+    dx = sum(e[1] - s[1] for s, e in segs) / len(segs)
+    dy = sum(e[2] - s[2] for s, e in segs) / len(segs)
+    norm = math.hypot(dx, dy)
+    if norm < 1e-6:
+        return [auto_boundary(tracks, W, H)]
+    ux, uy = dx / norm, dy / norm                     # 平均运动方向
+    px, py = -uy, ux                                  # 与之垂直, 即边界线方向
+
+    # 把所有轨迹点投影到运动轴上, 取投影范围, 在范围内等距铺线
+    proj = [(p[1] * ux + p[2] * uy) for pts in tracks.values() for p in pts]
+    lo, hi = min(proj), max(proj)
+    if hi - lo < 1e-6:
+        return [auto_boundary(tracks, W, H)]
+    ox = sum(p[1] for pts in tracks.values() for p in pts) / max(1, len(proj))
+    oy = sum(p[2] for pts in tracks.values() for p in pts) / max(1, len(proj))
+    o_proj = ox * ux + oy * uy
+    L = float(W + H)
+
+    lines = []
+    for i in range(n):
+        t = lo + (hi - lo) * ((i + 1) / (n + 1))
+        cx, cy = ox + ux * (t - o_proj), oy + uy * (t - o_proj)
+        lines.append([[cx - px * L, cy - py * L], [cx + px * L, cy + py * L]])
+    return lines
+
+
+def _seg_hit(p1, p2, p3, p4) -> bool:
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    d1, d2 = cross(p3, p4, p1), cross(p3, p4, p2)
+    d3, d4 = cross(p1, p2, p3), cross(p1, p2, p4)
+    return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
+
+
+def cross_frames(tracks: dict[str, list[list[float]]],
+                 line: list[list[float]]) -> set[int]:
+    """这条线在哪些帧被穿过。用来把边界配给真的有越界发生的帧。"""
+    out: set[int] = set()
+    a, b = line[0], line[-1]
+    for pts in tracks.values():
+        for i in range(len(pts) - 1):
+            if _seg_hit((pts[i][1], pts[i][2]), (pts[i + 1][1], pts[i + 1][2]), a, b):
+                out.add(int(pts[i + 1][0]))
+    return out
+
+
 def _parse_boundaries(path: str | None) -> dict[str, list[list[float]]]:
     if not path:
         return {}
@@ -109,7 +172,7 @@ def _parse_boundaries(path: str | None) -> dict[str, list[list[float]]]:
 
 # ---------------------------------------------------------------- MOT
 def build_mot(root: str, stride: int = 30, boundaries: str | None = None,
-              auto: bool = True, view: str = "uav") -> list[Scene]:
+              auto: bool = True, view: str = "uav", n_boundaries: int = 3) -> list[Scene]:
     """MOT 标注: <frame,target_id,x,y,w,h,score,category,truncation,occlusion>"""
     r = Path(root)
     seq_root = next((d for d in (r / "sequences", r) if d.is_dir()), r)
@@ -157,11 +220,15 @@ def build_mot(root: str, stride: int = 30, boundaries: str | None = None,
         for v in all_tracks.values():
             v.sort(key=lambda p: p[0])
 
-        pts = manual.get(seq.name)
-        if pts is None and auto:
-            pts = auto_boundary(all_tracks, W, H)
-            n_auto += 1
-        region = Region(name=f"restricted_{seq.name}", type="polyline", points=pts) if pts else None
+        man = manual.get(seq.name)
+        lines: list[list[list[float]]] = []
+        if man is not None:
+            lines = [man]
+        elif auto:
+            lines = auto_boundaries(all_tracks, W, H, n_boundaries)
+            n_auto += len(lines)
+        # 每条线各自在哪些帧被穿过 —— 配边界时优先给真有越界发生的帧
+        hits = [cross_frames(all_tracks, ln) for ln in lines]
 
         half = max(1, stride // 2)
         diag = math.hypot(W, H)
@@ -184,6 +251,14 @@ def build_mot(root: str, stride: int = 30, boundaries: str | None = None,
                 objs.append(Obj(id=i, cls=cls, track_id=row["tid"],
                                 bbox=[row["x"], row["y"], row["x"] + row["w"], row["y"] + row["h"]],
                                 attrs={} if moving is None else {"moving": moving}))
+            # 这一帧附近哪条线真被穿过就用哪条; 都没有就轮着来(那就是个负样本)
+            region = None
+            if lines:
+                bi = next((i for i, hs in enumerate(hits)
+                           if any(k - half <= f <= k + half for f in hs)),
+                          (k // max(1, stride)) % len(lines))
+                region = Region(name=f"restricted_{seq.name}_{bi}", type="polyline",
+                                points=lines[bi])
             img = seq / f"{k:07d}.jpg"
             if not img.exists():
                 idx = frames.index(k)
@@ -193,10 +268,11 @@ def build_mot(root: str, stride: int = 30, boundaries: str | None = None,
                 width=W, height=H, source_dataset=DATASET_MOT, license=LICENSE, view=view,
                 objects=objs, regions=[region] if region else [], tracks=tracks,
                 meta={"sequence": seq.name, "frame_idx": k,
-                      "boundary_source": "manual" if seq.name in manual else ("auto" if pts else "none")}))
+                      "boundary_source": ("manual" if seq.name in manual
+                                          else ("auto" if lines else "none"))}))
 
-    print(f"[{DATASET_MOT}] {len(scenes)} 帧(stride={stride}), 自动放置边界 {n_auto} 条, "
-          f"人工边界 {len(manual)} 条")
+    print(f"[{DATASET_MOT}] {len(scenes)} 帧(stride={stride}), 自动放置边界 {n_auto} 条"
+          f"(每序列 {n_boundaries} 条), 人工边界 {len(manual)} 条")
     if n_auto:
         print("  自动边界 = 垂直于平均运动方向、过轨迹中心的直线。"
               "建议抽查几个序列的越界结果是否合理")

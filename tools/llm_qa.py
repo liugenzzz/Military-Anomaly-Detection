@@ -386,9 +386,17 @@ def plan_quota(scenes: list[Scene], facets: dict[str, list[Facet]], target: int,
         顶到侧面池抽干为止, 还不够就如实报缺口, 不靠复制样本凑数;
       - 富余类(explosion/smoke)按 **图** 下采样, 不是逐条丢, 同图的几条要一起走。
     """
+    # 归类口径与规则侧一致: 同时属于多类的图归到最稀缺的那一类。
+    # 取 anomaly_types[0] 是错的 —— 烟雾与爆炸同框的图会全被算成第一个类,
+    # 另一类的配额凭空少掉一大块。
+    total: dict[str, int] = {}
+    for s in scenes:
+        for c in (s.anomaly_types or ["normal"]):
+            total[c] = total.get(c, 0) + 1
     by_cls: dict[str, list[Scene]] = {}
     for s in scenes:
-        by_cls.setdefault((s.anomaly_types or ["normal"])[0], []).append(s)
+        cls = min(s.anomaly_types or ["normal"], key=lambda c: (total.get(c, 0), c))
+        by_cls.setdefault(cls, []).append(s)
 
     rng = random.Random(seed)
     plan: dict[str, tuple[list[Scene], int]] = {}
@@ -460,8 +468,13 @@ def cmd_generate(args, onto):
 
     reqs: list[dict] = []
     n_skip = 0
+    cls_total: dict[str, int] = {}
     for s in scenes:
-        anomaly = (s.anomaly_types or ["normal"])[0]
+        for c in (s.anomaly_types or ["normal"]):
+            cls_total[c] = cls_total.get(c, 0) + 1
+    for s in scenes:
+        anomaly = min(s.anomaly_types or ["normal"],
+                      key=lambda c: (cls_total.get(c, 0), c))
         facts = build_facts(s, onto, args.max_objects)
         k = plan[anomaly][1] if plan and anomaly in plan else args.facets_per_image
         picked = _pick_facets(s, facets, anomaly, rng, k)

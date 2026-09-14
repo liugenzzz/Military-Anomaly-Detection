@@ -83,19 +83,30 @@ def build(root: str, tiles_dir: str, tile: int = 1024, overlap: int = 200,
           seed: int = 0, view: str = "satellite") -> list[Scene]:
     r = Path(root)
     img_dir = next((d for d in (r / "images", r) if d.is_dir()), r)
-    lab_dir = next((d for d in (r / "labelTxt", r / "labels", r) if d.is_dir()), r)
     rng = random.Random(seed)
 
     imgs = sorted(p for p in img_dir.rglob("*") if p.suffix.lower() in (".png", ".jpg", ".tif", ".tiff"))
     if not imgs:
         raise RuntimeError(f"{DATASET}: 在 {img_dir} 下找不到图像")
 
+    # 标注按文件名建索引, 全目录树扫一遍。
+    # DOTA-v2.0 的标注不在 labelTxt/ 下平铺, 而是 labelTxt-v2.0/DOTA-v2.0_train/ 这类
+    # 嵌套目录; 只在固定的一两个目录里按文件名直接拼路径, 会一个都对不上 ——
+    # 症状是"切了一万八千片、目标框合计 0", 整批 DOTA 退化成空白负样本。
+    lab_index: dict[str, Path] = {}
+    for t in r.rglob("*.txt"):
+        if t.name.lower() in ("readme.txt", "classes.txt") or t.is_dir():
+            continue
+        lab_index.setdefault(t.stem, t)
+    if not lab_index:
+        print(f"[warn] {DATASET}: 整个目录树里没有 .txt 标注, 产出的将全是无目标的空切片")
+
     scenes, n_tiles, n_kept_empty, n_cluster_tiles = [], 0, 0, 0
     failed: list[tuple[str, str]] = []
     for img in imgs:
-        lab = lab_dir / f"{img.stem}.txt"
+        lab = lab_index.get(img.stem)
         raw: list[tuple[str, list[float]]] = []
-        if lab.exists():
+        if lab is not None:
             for cls, bbox, diff in parse_dota_txt(lab):
                 key = cls.strip().lower()
                 if key in DROP:
@@ -142,6 +153,10 @@ def build(root: str, tiles_dir: str, tile: int = 1024, overlap: int = 200,
           f"(其中稀疏/空切片 {n_kept_empty}, 以簇为中心补切 {n_cluster_tiles})")
     print("  提示: DOTA 的 plane/ship 映射为 civil-plane/ship, 因此密集民用机群与"
           "港口会成为困难负样本, 这是预期行为")
+    n_hit = sum(1 for im in imgs if im.stem in lab_index)
+    if n_hit < len(imgs):
+        print(f"[warn] {DATASET}: {len(imgs) - n_hit}/{len(imgs)} 张原图没有对应标注, "
+              f"这些图只会产出空切片")
     if failed:
         print(f"[warn] {DATASET}: {len(failed)} 张原图切片失败, 已跳过(其余照常产出):")
         for name, why in failed[:5]:

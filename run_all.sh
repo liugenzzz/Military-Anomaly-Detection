@@ -30,6 +30,11 @@ RELAX_BELOW="${RELAX_BELOW:-3000}"         # 产量低于这么多张图的类�
 # VisDrone-MOT 太稀(24960 帧只取 832), 近重复由 screen.py 的闸3 兜底。
 STRIDE_CROWD="${STRIDE_CROWD:-8}"
 STRIDE_MOT="${STRIDE_MOT:-8}"
+# 每个 MOT 序列铺几条平行边界线。只铺一条的话, 一个序列里只有中间几帧算越界,
+# border_crossing 的产量就卡在那; 铺开之后不同的帧被不同的线截住, 同一段素材
+# 产出的是**不同的**问答(越界目标、时机、方向都不同)。但图还是那些图,
+# 调太高只是在同一批画面上反复出题, 别超过 5。
+MOT_BOUNDARIES="${MOT_BOUNDARIES:-3}"
 STRIDE_DA="${STRIDE_DA:-10}"
 # 媒体归集: 填了就把引用到的图片/视频硬链到语料库目录, 并把 json 里的路径改过去
 #   MEDIA_ROOT=/mnt/si003010kcx0/mmdata/data_process/corpus_media
@@ -43,7 +48,13 @@ SKIPPED=()
 # 解析数据集目录: 先按给定名字找, 再按"名字 + 很短的尾巴"找(MAR201 / MAR20_v2
 # 这种手动解压时改过的名字), 找到有内容的就返回其路径。
 has_media() {
-  [ -n "$(find "$1" -maxdepth 4 \( -name '*.jpg' -o -name '*.png' -o -name '*.mp4' -o -name '*.avi' \) -print -quit 2>/dev/null)" ]
+  # 后缀要忽略大小写(很多数据集是 .JPG), 扩展名要全, 深度要够 ——
+  # 只认四种小写后缀、最深四层的话, Mendeley 这种 .JPG/嵌套深的数据集会被判成"没下到"
+  # 而直接跳过, 而 doctor 那边用的是全树 rglob, 两边结论会打架。
+  [ -n "$(find "$1" -maxdepth 6 \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \
+          -o -iname '*.bmp' -o -iname '*.tif' -o -iname '*.tiff' -o -iname '*.webp' \
+          -o -iname '*.mp4' -o -iname '*.avi' -o -iname '*.mkv' -o -iname '*.mov' \) \
+          -print -quit 2>/dev/null)" ]
 }
 resolve() {
   # 按名字从具体到笼统逐个试; 每个名字都走"本层 -> 下一层 -> 近似名"三步,
@@ -83,16 +94,25 @@ if D=$(resolve VisDrone2019-DET-train VisDrone-DET VisDrone/VisDrone2019-DET-tra
   prepared "$OUT/interim/vd_det.jsonl" || run $PY tools/prepare.py visdrone-det --root "$D" --out "$OUT/interim/vd_det.jsonl"
 fi
 if D=$(resolve VisDrone2019-MOT-train VisDrone-MOT VisDrone/VisDrone2019-MOT-train); then
-  prepared "$OUT/interim/vd_mot.jsonl" || run $PY tools/prepare.py visdrone-mot --root "$D" --stride "$STRIDE_MOT" --out "$OUT/interim/vd_mot.jsonl"
+  prepared "$OUT/interim/vd_mot.jsonl" || run $PY tools/prepare.py visdrone-mot --root "$D" --stride "$STRIDE_MOT" --boundaries-per-seq "$MOT_BOUNDARIES" --out "$OUT/interim/vd_mot.jsonl"
 fi
 [ -f "$OUT/interim/vd_mot.jsonl" ] || SKIPPED+=("VisDrone-MOT(border_crossing 唯一来源)")
 if D=$(resolve DOTA DOTA-v2.0 dota);   then prepared "$OUT/interim/dota.jsonl" || run $PY tools/prepare.py dota --root "$D" --tiles-dir "$OUT/tiles/dota" --out "$OUT/interim/dota.jsonl"; else SKIPPED+=("DOTA"); fi
 if D=$(resolve Drone-Anomaly drone_anomaly); then prepared "$OUT/interim/drone_anomaly.jsonl" || run $PY tools/prepare.py drone-anomaly --root "$D" --stride "$STRIDE_DA" --out "$OUT/interim/drone_anomaly.jsonl"; else SKIPPED+=("Drone-Anomaly"); fi
 
 shopt -s nullglob
-FILES=("$OUT"/interim/*.jsonl)
+# 只合并本流程自己产出的这几个文件, 不用 *.jsonl 通配 ——
+# interim/ 下还躺着历史 demo 数据和 llm_requests.jsonl(那是请求不是 scene),
+# 通配会把它们一起 cat 进去: 上一轮就混进了 40 条 DEMO-synthetic, 还制造了
+# 两千多个 duplicate_scene_id。
+INTERIM_FILES=(mar20 mendeley fasdd era dronecrowd vd_det vd_mot dota drone_anomaly)
+FILES=()
+for n in "${INTERIM_FILES[@]}"; do
+  f="$OUT/interim/$n.jsonl"
+  [ -s "$f" ] && FILES+=("$f")
+done
 [ ${#FILES[@]} -eq 0 ] && { echo "没有任何可用数据, 退出"; exit 1; }
-cat "${FILES[@]}" > "$OUT/all_scenes.jsonl"          # 显式列文件, 不用 *.jsonl 以免把输出 cat 进去
+cat "${FILES[@]}" > "$OUT/all_scenes.jsonl"
 echo "合并 ${#FILES[@]} 个来源 -> $OUT/all_scenes.jsonl ($(wc -l < "$OUT/all_scenes.jsonl") 个 scene)"
 
 step "2. 事件派生"
