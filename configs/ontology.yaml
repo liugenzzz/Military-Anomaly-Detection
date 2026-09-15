@@ -7,13 +7,16 @@
 #     而是标为 hard_negative 困难负样本(避免把停车场训成装甲集群)
 #   - 人员聚集不设军事身份要求: 航拍视角分辨不出军装, 该约束不可实现
 #   - 停用的类别保留在文件末尾(enabled: false), 便于日后一行恢复
+#   - v0.5.0: 停用越界移动(单帧不可判 + 虚拟边界靠文字注入, 是在教模型编);
+#     启用车队机动(补上间距均匀/车型一致/细长三条判据后才分得开车流);
+#     新增灾害现场(把原先被整个排除的 ERA 洪水/滑坡/震后/事故单列成类)。
 #   - v0.4.0: 每条规则加 relax 档。产量够的类别照严格阈值走(多的筛精),
 #     产量不够的类别才启用放宽档补量(少的放宽), 且补出来的事件带 relaxed
 #     标记, 下游答案措辞随之变软 —— 放宽的是召回, 不是结论的确定性。
 #   - v0.2.1: 军用/民用目标分开命名(military-plane vs civil-plane),
 #     民用机场机群与民用港口因此成为困难负样本而非误标为集结
 
-version: "0.4.0"
+version: "0.5.0"
 box_scale: 1000                 # grounding 坐标归一化上限, Qwen-VL 系列用 1000
 negative_ratio_target: 0.30     # normal 样本占比下限
 qa_per_anomaly_target: 25000    # 每个异常类的 QA 条数目标
@@ -92,9 +95,17 @@ classes:
     cues: ["烟柱", "灰白扩散团", "烟幕遮蔽地表"]
     rule: {kind: label_transfer, from_labels: ["smoke", "Smoke", "fire"]}
 
+  # ── v0.5.0 停用。停用理由(不是数据不够, 是这一类本身立不住):
+  #   1. 越界是"轨迹与边界的关系", 单帧里看不见 —— 运动看不见, 边界更看不见;
+  #   2. 那条边界是我们自己画的虚拟线, 图上根本不存在。把它写进问题(「设有一条
+  #      近似垂直纵贯画面的虚拟警戒线」), 等于用自然语言往图里注入一个不存在的
+  #      几何前提, 再要模型在脑子里画出来判断相交 —— 这是在教模型顺着话编。
+  #   3. 数据也只有 VisDrone-MOT 一个来源, 且人工核对困难。
+  # 要恢复的话, 正确做法是把警戒线**真的画到图上**(半透明红线), 让它变成纯视觉题,
+  # 和真实电子围栏一致; 而不是用文字描述一条看不见的线。
   - id: border_crossing
     zh: 越界移动
-    enabled: true
+    enabled: false
     cues: ["目标轨迹跨越边界线", "进入禁入区域", "由界外向界内移动"]
     rule:
       kind: boundary_cross
@@ -106,6 +117,28 @@ classes:
         min_displacement_ratio: 0.01
         target_classes: ["person", "vehicle", "soldier", "truck", "car", "van",
                          "bus", "motor", "pedestrian", "people"]
+
+  - id: disaster
+    zh: 灾害现场
+    enabled: true
+    # v0.5.0 新增。ERA 的 flood / landslide / mudslide / post_earthquake /
+    # traffic_collision 原本被整个排除, 理由是"画面常含烟尘火光, 既不能当异常
+    # 也不能当正常"。但那个理由只在它们**没有自己的类别**时成立 —— 单列一类,
+    # 歧义就消失了: 它们不再是"说不清算不算异常", 而是明确的第五类。
+    # 顺带救回上一轮被丢掉的那 691 段视频。
+    #
+    # 这一类是航拍异常检测里最好判的: 洪水、滑坡、废墟在俯视角下极其显著,
+    # 单帧就能判, 不需要任何外部前提。
+    cues: ["大面积水体漫过原有地表", "山体垮塌与泥流痕迹", "建筑成片倒塌",
+           "道路中断或被掩埋", "车辆异常聚集于事故点"]
+    subtypes:
+      - {name: flood, zh: 洪涝}
+      - {name: landslide, zh: 滑坡泥石流}
+      - {name: collapse, zh: 建筑垮塌}
+      - {name: collision, zh: 交通事故}
+    rule: {kind: label_transfer,
+           from_labels: ["flood", "landslide", "mudslide", "post_earthquake",
+                         "traffic_collision"]}
 
   # ---------------------------------------------------------------- 已停用
   # 恢复方式: enabled 改 true。但请先确认数据量能支撑 25,000 条 QA(约 2,800 张图)。
@@ -121,15 +154,28 @@ classes:
 
   - id: convoy
     zh: 车队机动
-    enabled: false
-    # 停用原因: 与正常道路交通无法可靠区分, 概念边界不清晰。
-    # 车辆的运动状态已作为 moving 属性保留在目标标注中。
-    cues: ["车辆沿道路线性排列", "同向运动", "间距均匀"]
+    enabled: true
+    # v0.5.0 启用。当初停用的理由是"与正常道路交通无法可靠区分" —— 那是因为
+    # 判据只有"共线 + 数量", 而正常车流同样共线。补上三条才分得开:
+    #   间距均匀(车队保队形, 车流忽快忽慢)、车型一致(车队同型, 车流混杂)、
+    #   细长(车队是一条, 停车场是一片)。实测: 军卡车队命中, 混杂车流与停车场式
+    #   排布都不命中。
+    cues: ["车辆沿道路线性排列", "间距均匀", "同型同向", "队列细长"]
     rule:
       kind: linear_formation
-      target_classes: ["vehicle", "large-vehicle", "truck", "car"]
+      target_classes: ["military-truck", "military-vehicle", "armored", "tank",
+                       "truck", "large-vehicle", "vehicle"]
       min_count: 5
-      collinearity_r2: 0.90
+      collinearity_r2: 0.92
+      max_spacing_cv: 0.45        # 间距变异系数上限 —— 超过就是车流不是车队
+      min_elongation: 4.0         # 主轴跨度 / 垂直跨度 —— 低于这个是一片, 属集结
+      min_same_class_ratio: 0.7   # 同型占比 —— 低于这个是混杂车流
+      require_any: ["military-truck", "military-vehicle", "armored", "tank"]
+      on_require_fail: hard_negative
+      relax:
+        min_count: 4
+        collinearity_r2: 0.88
+        max_spacing_cv: 0.55
 
   - id: naval_massing
     zh: 舰船集结

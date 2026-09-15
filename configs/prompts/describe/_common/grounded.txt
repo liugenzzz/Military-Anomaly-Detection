@@ -6,7 +6,7 @@
 # 而"差不多"的框喂进训练, 比不给框更糟。
 #! kind: grounded
 #! zh: 带框描述
-#! anomaly: massing explosion smoke border_crossing
+#! anomaly: massing explosion smoke convoy disaster
 #! needs: 该图能算出异常区域框
 #! must-not: bbox 坐标 像素 归一化 x1 y1 左上角坐标 右下角坐标
 #! min-items: 2
@@ -26,6 +26,12 @@ a-example.smoke: 画面下缘偏右升起一柱灰白色的烟，下端细、越
 a-example.border_crossing: 画面中部横贯的那条界线附近有三个车辆目标，
   它们已经从界线的一侧移动到了另一侧，彼此保持着不大的间距、朝同一方向行进。
   界线另一侧的区域内没有其他活动目标。
+a-example.convoy: 画面右下到中部有一列车辆沿路排开，前后拉开大致相等的距离，
+  车身外形一致。队列整体是直的，只在中段随路面有一处轻微弯折，
+  路的两侧都是空地，没有其他成规模的车辆。
+a-example.disaster: 画面中部偏下的大片区域被浑浊的覆盖层盖住，与右侧未受影响的地表
+  有清楚的分界。区域里能看到几处只剩屋顶的建筑，原本的道路在这一段中断，
+  往外侧还有一段路面露在外面。
 q-bank:
   描述一下画面中的异常情况，并标出它所在的区域。
   说明这里发生了什么，同时框出对应位置。

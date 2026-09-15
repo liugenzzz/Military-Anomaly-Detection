@@ -3,7 +3,7 @@
 # 硬塞坐标会让模型学到一个反常识的映射。要坐标的题走 locate_box，问法完全不同。
 #! kind: position
 #! zh: 空间方位
-#! anomaly: massing explosion smoke border_crossing normal
+#! anomaly: massing explosion smoke convoy disaster normal
 #! needs: 任意有异常或有主要目标的图都行
 #! must-not: bbox_2d 坐标 边界框 检测框 [ 颜色 因为 依据 符合
 #! granularity: zone ratio landmark
@@ -23,6 +23,10 @@ a-example.border_crossing: 三个目标横向分散在画面左侧三成、中�
   纵向都集中在画面中下部约四成高度，彼此大致处于同一水平线上。
 a-example.normal: 主要目标集中在画面中部偏左，横向约占从左往右两成到六成的范围，
   纵向处在中间三分之一处，其余部分为空置路面与建筑顶部。
+a-example.convoy: 队列自画面左下方向右上方斜向延伸，起点靠近下缘约四分之一处，
+  末端接近右侧边缘，纵向大致跨越画幅的三分之二。
+a-example.disaster: 受影响区域主要集中在画面中部偏下，向左延伸到左缘，
+  右侧在约三分之二处收住，上缘一带未被波及。
 q-bank:
   {zh}出现在画面的什么位置？
   {zh}处在画面的哪一块？

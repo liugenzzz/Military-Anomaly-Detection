@@ -3,7 +3,7 @@
 # 而不是只会喊一句"存在异常"。
 #! kind: evidence
 #! zh: 判定依据
-#! anomaly: massing explosion smoke border_crossing
+#! anomaly: massing explosion smoke convoy disaster
 #! needs: 该图有明确的异常事件
 #! must-not: 画面左 画面右 画面上 画面下 左上 右上 左下 右下 靠近边缘 什么方位
 #! min-items: 3
@@ -22,6 +22,12 @@ a-example.smoke: 依据有三：存在一片边界模糊、半透明的灰白色
 a-example.border_crossing: 依据是目标轨迹与标定边界的相交关系：三个车辆在首帧处于
   边界一侧，末帧处于另一侧，运动方向持续同向，总位移超过画面对角线的百分之二，
   可排除定位抖动造成的误判。
+a-example.convoy: 依据有三：一是车辆沿一条直线排开，而非零散停放；二是前后间距
+  大致相等，不是走走停停的车流；三是车型外形一致、尺寸相近，属于同一批装备
+  而非混杂交通。
+a-example.disaster: 依据有三：一是原本规整的地块纹理被大面积覆盖，田埂轮廓几乎消失；
+  二是覆盖层与周边未受影响地表有清楚的分界；三是区域内的建筑只露出屋顶、
+  树木成片朝同一方向倒伏。
 q-bank:
   凭哪些迹象判断这是{zh}？
   判定为{zh}的依据是什么？

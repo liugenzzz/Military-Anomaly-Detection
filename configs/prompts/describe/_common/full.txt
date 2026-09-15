@@ -2,7 +2,7 @@
 # 【刻意只占 10%】。它本身没错，但占满就会让所有描述长成一个样子。
 #! kind: full
 #! zh: 综合描述
-#! anomaly: massing explosion smoke border_crossing normal
+#! anomaly: massing explosion smoke convoy disaster normal
 #! needs: 任意图都行
 #! must-not: bbox_2d 检测框 [
 #! max-ratio: 0.10
@@ -23,6 +23,12 @@ a-example.border_crossing: 三帧无人机航拍序列。画面中共四个车�
 a-example.normal: 卫星遥感画面，画面中部偏左为一处停车区域，内有十四辆民用车辆分两排
   停放，排布规整。周边可见道路与建筑。画面中未见军事装备、未见烟火、未见跨越边界的
   移动目标，属于正常场景。
+a-example.convoy: 十余辆外形一致的箱式货车排成单列纵队，车身较长、尺寸相近，
+  前后间距大致相等。队列沿一条硬化道路自左下向右上延伸，纵向跨度接近画幅三分之二，
+  道路两侧是空旷的田地。
+a-example.disaster: 画面大半被一层浑浊的水面覆盖，颜色灰褐、反光明显，原有的田块纹理
+  只在边缘还能隐约看出。受影响区域连成一片，右侧有清楚的分界线；区域内几处建筑
+  只露出屋顶，路旁的树木有一部分倒伏。
 q-bank:
   请综合描述这张画面中的异常情况。
   用一段话说清画面里发生了什么。

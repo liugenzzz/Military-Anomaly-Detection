@@ -146,20 +146,90 @@ def _r_squared(pts: list[tuple[float, float]]) -> float:
     return (sxy * sxy) / (sxx * syy)
 
 
+def _axis_project(centers: list[tuple[float, float]]) -> list[float]:
+    """把点投影到主轴上, 返回排序后的投影坐标。用于算间距。"""
+    n = len(centers)
+    mx = sum(p[0] for p in centers) / n
+    my = sum(p[1] for p in centers) / n
+    sxx = sum((p[0] - mx) ** 2 for p in centers)
+    syy = sum((p[1] - my) ** 2 for p in centers)
+    sxy = sum((p[0] - mx) * (p[1] - my) for p in centers)
+    # 主轴方向 = 协方差矩阵最大特征向量
+    theta = 0.5 * math.atan2(2 * sxy, sxx - syy)
+    ux, uy = math.cos(theta), math.sin(theta)
+    return sorted((p[0] - mx) * ux + (p[1] - my) * uy for p in centers), (ux, uy)
+
+
 def derive_linear_formation(scene: Scene, rule: dict[str, Any], cls_id: str,
                            subtype: str | None = None) -> list[Event]:
+    """车队 / 列队机动。
+
+    **只看"共线 + 数量"是不够的** —— 正常道路上的车流同样共线, 这正是这条规则
+    当初被停用的原因。车队区别于车流的地方有三个, 缺一不可:
+      1. 间距均匀    车队保持队形, 间距变异系数小; 车流走走停停, 间距忽大忽小;
+      2. 车型一致    车队是同一批装备; 车流是轿车卡车客车混在一起;
+      3. 细长        沿主轴拉得很长、垂直方向很窄。停车场也共线, 但它是一片不是一条。
+    再叠加 require_any 的军事目标约束, 民用卡车列队就落到困难负样本里去 ——
+    和装备集结同一个套路, 那个已经验证有效。
+    """
     targets = {c.lower() for c in rule["target_classes"]}
     objs = scene.of_classes(targets)
     if len(objs) < rule["min_count"]:
         return []
     centers = [o.center for o in objs]
+
     r2 = _r_squared(centers)
     if r2 < rule["collinearity_r2"]:
         return []
+
+    proj, axis = _axis_project(centers)
+    gaps = [b - a for a, b in zip(proj, proj[1:])]
+    if not gaps:
+        return []
+    mean_gap = sum(gaps) / len(gaps)
+    if mean_gap <= 1e-6:
+        return []
+    cv = (sum((g - mean_gap) ** 2 for g in gaps) / len(gaps)) ** 0.5 / mean_gap
+    if cv > rule.get("max_spacing_cv", 0.45):
+        return []                                  # 间距忽大忽小 —— 是车流不是车队
+
+    # 细长度: 沿主轴的跨度 / 垂直方向的跨度
+    ux, uy = axis
+    perp = [-(p[0] - centers[0][0]) * uy + (p[1] - centers[0][1]) * ux for p in centers]
+    span_long = max(proj) - min(proj)
+    span_perp = max(perp) - min(perp)
+    elong = span_long / max(1.0, span_perp)
+    if elong < rule.get("min_elongation", 4.0):
+        return []                                  # 是一片不是一条 —— 那是集结, 不是车队
+
+    by_cls: dict[str, int] = {}
+    for o in objs:
+        by_cls[o.cls.lower()] = by_cls.get(o.cls.lower(), 0) + 1
+    main_cls, main_n = max(by_cls.items(), key=lambda kv: kv[1])
+    if main_n / len(objs) < rule.get("min_same_class_ratio", 0.7):
+        return []                                  # 车型杂 —— 是车流不是车队
+
+    require = {c.lower() for c in rule.get("require_any", [])}
+    if require and not (set(by_cls) & require):
+        if rule.get("on_require_fail") == "hard_negative":
+            scene.meta["hard_negative"] = True
+            scene.meta.setdefault("hard_negative_reason", []).append(
+                f"{cls_id}: {len(objs)} 个目标列队行进且间距均匀, 但均为民用车辆")
+            xs = [c[0] for c in centers]
+            ys = [c[1] for c in centers]
+            scene.meta.setdefault("hard_negative_bbox",
+                                  [min(xs), min(ys), max(xs), max(ys)])
+        return []
+
+    xs = [c[0] for c in centers]
+    ys = [c[1] for c in centers]
     return [Event(
         type=cls_id,
-        conf=float(r2),
+        conf=round(min(1.0, r2 * (1.0 - cv)), 3),
         evidence={"rule": "linear_formation", "count": len(objs), "r2": round(r2, 4),
+                  "spacing_cv": round(cv, 3), "elongation": round(elong, 2),
+                  "main_class": main_cls,
+                  "cluster_bbox": [min(xs), min(ys), max(xs), max(ys)],
                   "object_ids": [o.id for o in objs]},
     )]
 
@@ -278,6 +348,22 @@ def derive(scenes: list[Scene], ontology: dict[str, Any], overwrite: bool = Fals
                 if key not in existing:
                     existing.add(key)
                     scene.events.append(ev)
+        # 车队优先于集结。同一批车排成一列, 密度聚类同样会判成"密集成簇" ——
+        # 但"聚成一片"和"拉成一条"是两回事, 判定答案说"异常聚集"就错了。
+        # 两个事件覆盖同一批目标时, 保留更具体的那个(车队)。
+        conv = [e for e in scene.events if e.type == "convoy"]
+        if conv:
+            conv_ids = {i for e in conv for i in e.evidence.get("object_ids", [])}
+            kept = []
+            for e in scene.events:
+                ids = set(e.evidence.get("object_ids", []))
+                overlap = len(ids & conv_ids) / max(1, len(ids))
+                if e.type != "convoy" and e.evidence.get("rule") == "density_cluster" \
+                        and overlap >= 0.6:
+                    continue                       # 同一批目标, 让位给车队
+                kept.append(e)
+            scene.events = kept
+
         # 事件与困难负样本互斥: 有真事件就不是负样本
         if scene.events:
             scene.meta.pop("hard_negative", None)

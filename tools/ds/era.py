@@ -32,6 +32,14 @@ LICENSE = "research-only(视频源自 YouTube, 按原协议使用)"
 # 映射为异常事件。conflict/parade 等归入 massing 的 personnel 子类
 ANOMALY = {
     "fire": ("explosion", None),
+    # v0.5.0: 这五类原先在 EXCLUDE 里(理由是"画面常含烟尘火光, 既不能当异常
+    # 也不能当正常")。单列成"灾害现场"一类之后歧义就不存在了 —— 它们不是
+    # 说不清算不算异常, 而是明确的另一类。上一轮因此丢掉了 691 段视频。
+    "flood": ("disaster", "flood"),
+    "landslide": ("disaster", "landslide"),
+    "mudslide": ("disaster", "landslide"),
+    "post_earthquake": ("disaster", "collapse"),
+    "traffic_collision": ("disaster", "collision"),
     "conflict": ("massing", "personnel"),
     "parade_protest": ("massing", "personnel"),
     "parade": ("massing", "personnel"),
@@ -48,10 +56,9 @@ NORMAL = {
     "baseball", "basketball", "boating", "cycling", "running", "soccer", "swimming",
 }
 # 歧义类别: 画面常含烟尘/火光/土方, 既不能当异常也不能当正常, 直接排除
-EXCLUDE = {
-    "post_earthquake", "flood", "landslide", "mudslide",
-    "traffic_collision", "car_racing", "constructing",
-}
+# 仍然排除的: car_racing 画面是赛道与扬尘, 与灾害/爆炸都不像, 归哪类都别扭;
+# constructing 去重后仅约 300 张, 撑不起一个类。
+EXCLUDE = {"car_racing", "constructing"}
 
 
 # 这些目录名是划分层(train/test), 不是类别

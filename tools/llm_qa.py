@@ -48,8 +48,9 @@ FACET_WEIGHTS = {
     "intensity": 18, "debris": 18, "extent": 15, "stage": 12,
     "morphology": 18, "color": 18, "drift": 15, "occlusion": 12,
     "trajectory": 18, "timing": 18, "boundary_relation": 15, "group": 12,
-    # 越界这一类的图最少, 但它的信息最多(有轨迹、有方向、有前后段), 多开两个侧面
     "pace": 14, "aftermath": 14,
+    "formation_line": 18, "vehicle_mix": 18, "route": 15, "column_scale": 12,
+    "extent_damage": 18, "terrain_change": 18, "affected_objects": 15, "access": 12,
     "hard_neg": 40, "scan": 30,
     # 带框描述: 训练要求里"多模态描述(文字+图像区域)"直接对应这一类, 权重给到最高
     "grounded": 30,
@@ -86,6 +87,17 @@ def facet_applicable(kind: str, s: Scene) -> bool:
         "group": len(crossed) >= 2,
         "pace": bool(crossed) and n_frames > 1,
         "aftermath": bool(crossed) and n_frames > 1,
+        # 车队: 有列队事件才出
+        "formation_line": "convoy" in ev,
+        "vehicle_mix": "convoy" in ev,
+        "route": "convoy" in ev,
+        "column_scale": "convoy" in ev,
+        # 灾害: 有灾害事件才出。access 还要求画面里真有道路类地物, 否则"路通不通"
+        # 无从谈起 —— 一片水面里问道路, 模型只能编
+        "extent_damage": "disaster" in ev,
+        "terrain_change": "disaster" in ev,
+        "affected_objects": "disaster" in ev and len(s.objects) > 0,
+        "access": "disaster" in ev,
         "hard_neg": bool(s.meta.get("hard_negative")),
         "scan": not s.events,
         "evidence": bool(s.events),

@@ -54,7 +54,11 @@ MEASURE = {"military-plane": "架", "civil-plane": "架", "plane": "架",
            "military-vehicle": "辆", "military-truck": "辆", "armored": "辆",
            "person": "名", "soldier": "名", "drone": "架",
            "ship": "艘", "warship": "艘"}
-CLS_ZH = {"military-plane": "军用飞机", "civil-plane": "民航飞机", "tank": "坦克",
+CLS_ZH = {"military-plane": "军用飞机", "military-truck": "军用卡车",
+          "armored": "装甲车", "storage-tank": "储罐", "harbor": "码头",
+          "bridge": "桥梁", "helipad": "直升机坪",
+          "building": "建筑", "house": "房屋", "roof": "屋顶", "road": "道路",
+          "water": "水体", "debris": "碎屑", "civil-plane": "民航飞机", "tank": "坦克",
           "vehicle": "车辆", "large-vehicle": "大型车辆", "truck": "卡车",
           "person": "人员", "soldier": "士兵", "ship": "船只", "warship": "军舰",
           "drone": "无人机", "military-vehicle": "军用车辆", "fire": "火焰", "smoke": "烟雾"}
@@ -251,6 +255,35 @@ class RuleBuilder:
         )
 
     # -------------------------------------------------- 四类任务
+    DISASTER_ZH = {"flood": "大面积水体漫过原有地表", "landslide": "山体垮塌与泥流痕迹",
+                   "collapse": "建筑成片倒塌", "collision": "事故点车辆异常聚集"}
+
+    def _judge_detail(self, s: Scene, cls_hint: str) -> str:
+        """判定句里的那一句细节。**按事件类型分开写** —— 车队说"成簇分布"是错的,
+        那是集结的话; 灾害类没有 count 字段, 套计数模板会变成一句空话。"""
+        e = s.events[0] if s.events else None
+        rule = e.evidence.get("rule") if e else None
+        if rule == "linear_formation":
+            n = e.evidence.get("count")
+            what = cls_hint or (f"{n} 个目标" if n else "多个目标")
+            return self.rng.choice([
+                f"{what}沿一条线排开，前后间距大致相等。",
+                f"可见 {what} 排成纵队行进，队形整齐。",
+                f"涉及 {what}，呈线性排列而非散布。",
+            ])
+        if e is not None and e.type == "disaster":
+            sub = e.evidence.get("subtype") or ""
+            what = self.DISASTER_ZH.get(sub, "地表出现大范围异常变化")
+            return self.rng.choice([f"画面中可见{what}。", f"主要特征是{what}。",
+                                    f"{what}，覆盖范围明显。"])
+        if cls_hint:
+            return self.rng.choice([
+                f"画面中可见 {cls_hint} 密集分布。",
+                f"共观察到 {cls_hint}，成簇分布。",
+                f"涉及 {cls_hint}。",
+            ])
+        return ""
+
     def judge(self, s: Scene) -> tuple[str, str]:
         q = self._ask("judge")
         if s.anomaly_types:
@@ -270,13 +303,7 @@ class RuleBuilder:
             else:
                 lead = self.rng.choice(["存在异常，为", "画面中出现异常：", "判定为",
                                         "有异常。类型为"])
-            tail = ""
-            if cls_hint:
-                tail = self.rng.choice([
-                    f"画面中可见 {cls_hint} 密集分布。",
-                    f"共观察到 {cls_hint}，成簇分布。",
-                    f"涉及 {cls_hint}。",
-                ])
+            tail = self._judge_detail(s, cls_hint)
             if s.events and all(e.evidence.get("relaxed") for e in s.events):
                 need = self.rng.choice(["规模有限，建议继续观察确认。", "尚未达到典型规模，建议复核。",
                                         "证据强度一般，建议结合后续画面判断。"])
@@ -293,11 +320,11 @@ class RuleBuilder:
                  f"但均为民用目标，未见坦克、装甲车或军机等军事装备，属于正常场景。")
         else:
             a = self.rng.choice([
-                "未见异常。目标分布稀疏，无烟火迹象，也没有跨越边界的移动目标。",
+                "未见异常。目标分布稀疏，无烟火迹象，也没有成队行进的车辆。",
                 "未见异常，态势正常，不需要上报。画面中没有成规模的目标聚集，"
                 "也没有烟雾或火光。",
                 "属于正常态势。逐项核查：无军事装备集结、无人员异常聚集、"
-                "无烟火、无越界移动。",
+                "无烟火、无车队机动、无灾害迹象。",
                 "没有发现需要关注的情况。画面中的目标数量与分布都在常态范围内。",
                 "未见异常。该画面属于常规场景，无需进一步处置。",
             ])

@@ -46,6 +46,8 @@ INFERENCE_BAN = ["通常对应", "意味着", "说明存在", "由此可见", "�
 INFERENCE_EXEMPT = {"evidence", "reason", "hard_neg"}
 
 CROSS_CLASS_BAN: dict[str, list[str]] = {
+    "convoy": ["烟雾", "烟柱", "火光", "爆炸", "洪水", "滑坡", "垮塌", "淹没"],
+    "disaster": ["集结", "列队", "纵队", "车队", "阵列", "军事装备", "爆炸"],
     "massing": ["烟雾", "烟柱", "火光", "火焰", "爆炸", "爆燃", "越界", "禁区"],
     "explosion": ["集结", "列队", "阵列", "越界", "禁区", "编队"],
     "smoke": ["爆炸", "爆燃", "火球", "集结", "列队", "阵列", "越界", "禁区"],
@@ -185,9 +187,10 @@ EXPECTED = {
                   "intensity", "debris", "extent", "stage"},
     "smoke": {"evidence", "position", "full", "grounded",
               "morphology", "color", "drift", "occlusion"},
-    "border_crossing": {"evidence", "position", "full", "grounded",
-                        "trajectory", "timing", "boundary_relation", "group",
-                        "pace", "aftermath"},
+    "convoy": {"evidence", "position", "full", "grounded",
+               "formation_line", "vehicle_mix", "route", "column_scale"},
+    "disaster": {"evidence", "position", "full", "grounded",
+                 "extent_damage", "terrain_change", "affected_objects", "access"},
     "normal": {"position", "full", "hard_neg", "scan"},
 }
 
