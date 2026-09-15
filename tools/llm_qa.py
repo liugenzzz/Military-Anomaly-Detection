@@ -181,18 +181,16 @@ def build_facts(scene: Scene, onto: dict[str, Any], max_objects: int = 30) -> di
 DEFAULT_MODEL = "Qwen3.8-27B"        # 与自建推理池同一套服务
 
 
-def _norm_base(u: str) -> str:
-    """容忍两种写法: 填到 /v1 为止, 或把整个 /v1/chat/completions 都填进来。
-    对齐目标检测那个项目的 config —— 那边 api_url 写的是完整路径。"""
-    u = u.strip().rstrip("/")
-    for suf in ("/chat/completions", "/completions"):
-        if u.endswith(suf):
-            u = u[: -len(suf)]
-    return u
-
-
 @dataclass
 class Endpoint:
+    """一路端点。**url 原样使用, 不做任何猜测。**
+
+    以前这里有一套 _norm_base: 把 /chat/completions 剥掉, 调用时再拼回去。
+    绕了一圈还是同一个地址, 却多出三种出错的可能。现在的规矩只有一条:
+      - 你填的是完整路径(.../v1/chat/completions) -> 原样用
+      - 你只填到 /v1                              -> 补上 /chat/completions
+    /v1/models 由 chat 地址换个尾巴得到, 不另外配。
+    """
     url: str
     model: str
     key: str = ""
@@ -200,52 +198,42 @@ class Endpoint:
     name: str = ""
 
     def __post_init__(self):
-        self.url = _norm_base(self.url)
-        self.name = self.name or self.url
+        u = self.url.strip().rstrip("/")
+        self.chat_url = u if u.endswith("/chat/completions") else u + "/chat/completions"
+        self.models_url = self.chat_url[: -len("/chat/completions")] + "/models"
+        self.name = self.name or self.chat_url
 
 
 def load_endpoints(path: str | None, role: str, model: str,
                    base_url: str | None) -> list[Endpoint]:
-    """端点池。优先读 yaml 配置, 否则退回单地址(逗号分隔也认)。
+    """端点池。来源只有两个: 配置文件, 或 --base-url。**没有环境变量兜底** ——
+    那条链是"静默连上外网"的根源: 配置读不到时它不报错, 而是去连 api.openai.com,
+    跑完一整轮才在报告里看到满屏 SSL 失败。
 
-    配置按角色分组: generate 与 review 各用各的池子。**审稿必须换模型** ——
-    同一个模型审自己写的答案基本全过, 六维就是摆设。配置文件里 review 那一组
-    留空时会退回 generate 的池子, 并在跑的时候提醒。
+    配置按角色分组, generate / review / screen。**审稿必须换模型** ——
+    同一个模型审自己写的答案基本全过。review 留空会退回 generate 并告警。
     """
     if path:
         cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
-        # 两种写法都认: configs/generate.yaml 把端点嵌在 endpoints: 底下,
-        # 早期的 endpoints.yaml.example 直接放在顶层。只认一种的话, 另一种会静默
-        # 退回默认的 OpenAI 地址 —— 表现是"配了端点却连不上外网"。
+        # endpoints: 底下分组(configs/generate.yaml), 或直接放在顶层(老格式)
         src = cfg.get("endpoints") if isinstance(cfg.get("endpoints"), dict) else cfg
         group = src.get(role)
         if group is None:
             group = src.get("generate") or []
-        if group:
-            out = []
-            for e in group:
-                if e.get("enabled") is False:
-                    continue                      # 暂停的那几路直接跳过, 不用删配置
-                out.append(Endpoint(url=e["url"], model=e.get("model", model),
-                                    key=str(e.get("key", "")),
-                                    concurrency=int(e.get("concurrency", 4)),
-                                    name=e.get("name", "")))
-            if out:
-                return out
-    raw = (base_url or os.environ.get("VLM_BASE_URL")
-           or os.environ.get("OPENAI_BASE_URL"))
-    if not raw:
-        # **不要静默回落到 api.openai.com**。这个坑咬过两次: 配置读不到时
-        # 悄悄去连外网, 跑完一整轮才在报告里看到满屏 SSL 失败, 而真正的原因
-        # (配置没被读到)完全没暴露出来。宁可当场报错。
-        raise SystemExit(
-            "没有可用的推理端点。\n"
-            "  - 用配置文件:  --endpoints configs/generate.yaml\n"
-            "  - 或单地址:    --base-url http://10.107.226.27:8001/v1\n"
-            "  - 或环境变量:  VLM_BASE_URL=...\n"
-            "先跑 `python tools/llm_qa.py ping` 确认每一路通不通。")
-    key = os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
-    return [Endpoint(url=u, model=model, key=key) for u in raw.split(",") if u.strip()]
+        out = [Endpoint(url=e["url"], model=e.get("model", model),
+                        key=str(e.get("key", "")),
+                        concurrency=int(e.get("concurrency", 4)),
+                        name=e.get("name", ""))
+               for e in group if e.get("enabled") is not False]
+        if out:
+            return out
+    if base_url:
+        return [Endpoint(url=u, model=model) for u in base_url.split(",") if u.strip()]
+    raise SystemExit(
+        "没有可用的推理端点。\n"
+        "  - 配置文件:  --endpoints configs/generate.yaml   (默认就读它)\n"
+        "  - 或单地址:  --base-url http://10.107.226.27:8001/v1/chat/completions\n"
+        "先跑 `python tools/llm_qa.py ping` 确认每一路通不通。")
 
 
 class LLM:
@@ -286,7 +274,7 @@ class LLM:
 
     def pick(self) -> Endpoint:
         with self._lock:
-            alive = [e for e in self.ring if e.url not in self.dead] or self.ring
+            alive = [e for e in self.ring if e.chat_url not in self.dead] or self.ring
             self._rr = (self._rr + 1) % len(alive)
             return alive[self._rr]
 
@@ -310,11 +298,11 @@ class LLM:
         last = None
         for attempt in range(self.max_retries):
             ep = self.pick()
-            url = ep.url
+            url = ep.chat_url                    # 原样用, 不拼不猜
             payload["model"] = ep.model          # 每路的模型名可能不同
             try:
                 req = urllib.request.Request(
-                    f"{url}/chat/completions",
+                    url,
                     data=json.dumps(payload).encode("utf-8"),
                     headers={"Content-Type": "application/json",
                              "Authorization": f"Bearer {ep.key}"})
@@ -599,11 +587,11 @@ def cmd_ping(args, onto):
                 continue
         print(f"\n[{role}] {len(pool)} 路")
         for e in pool:
-            tag = f"  {e.name:14s} {e.url}"
+            tag = f"  {e.name:14s} {e.chat_url}"
             # 1) /v1/models
             served = None
             try:
-                req = urllib.request.Request(f"{e.url}/models",
+                req = urllib.request.Request(e.models_url,
                                              headers={"Authorization": f"Bearer {e.key}"})
                 with urllib.request.urlopen(req, timeout=15) as r:
                     served = [m.get("id") for m in json.loads(r.read()).get("data", [])]
@@ -618,7 +606,7 @@ def cmd_ping(args, onto):
                       f"把配置里的 model 改成上面列出的名字")
                 continue
             # 2) 文本
-            one = LLM(e.model, e.url, cache_dir=None, temperature=0.0)
+            one = LLM(e.model, e.chat_url, cache_dir=None, temperature=0.0)
             one.pool = [e]
             one.ring = [e]
             try:

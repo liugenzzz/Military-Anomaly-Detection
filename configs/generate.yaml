@@ -1,82 +1,135 @@
+# ============================================================================
+# 生成端配置。**这是唯一需要改的文件** —— 端点、坐标制式、配额、题型配比、
+# 阈值全在这里，代码里不再留第二份默认值（两处默认值早晚会对不上）。
+#
+#   python tools/llm_qa.py ping                    # 先体检端点，再干别的
+#   bash run_all.sh <数据根>                        # 默认读本文件
+#   CONFIG=configs/generate.local.yaml bash ...    # 换一份（放真实 key 用这个）
+#
+# 数据处理（抽帧/切片/适配器/异常本体）不在这里，那部分归 configs/ontology.yaml。
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# 一、推理端点池
+#
+# **url 就写你平时 curl 的那条完整地址**，原样粘进来：
+#     http://10.107.226.27:8001/v1/chat/completions
+# 只填到 /v1 也行，代码会补上 /chat/completions。除此之外不做任何猜测 ——
+# 以前那套「先剥掉尾巴、调用时再拼回去」绕了一圈还是同一个地址，却多出三种
+# 出错的可能，其中一种就是配置读不到时静默去连 api.openai.com。
+# ping 查模型名用的 /v1/models 由对话地址换个尾巴得到，不用另外配。
+#
+# 直接 curl http://host:port/v1 返回 404 是 vLLM 的正常行为 —— 它只在
+# /v1/models 和 /v1/chat/completions 上响应，不代表服务有问题。
+#
+# **开跑之前先体检**：python tools/llm_qa.py ping
+# 逐路检查：通不通、服务的模型名叫什么（必须和下面的 model 完全一致，vLLM 没加
+# --served-model-name 时会用模型路径当名字）、文本能不能生成、认不认图。
+# 七万条跑到一半才发现某一路模型名不对，那一路的产出全是废的。
+#
+# concurrency 是加权轮转的权重：能扛 8 并发的那路分到的请求是扛 4 的两倍。
+# enabled: false 用来临时停用某一路，不用删配置。
+# ---------------------------------------------------------------------------
 endpoints:
   generate:
-  - name: 27-1
-    url: http://10.107.226.27:8001/v1
-    model: Qwen3.8-27B
-    key: local-pool-key
-    concurrency: 4
-  - name: 27-2
-    url: http://10.107.226.27:8002/v1
-    model: Qwen3.8-27B
-    key: local-pool-key
-    concurrency: 4
-  - name: 27-3
-    url: http://10.107.226.27:8003/v1
-    model: Qwen3.8-27B
-    key: local-pool-key
-    concurrency: 4
+    - {name: "27-1", url: "http://10.107.226.27:8001/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+    - {name: "27-2", url: "http://10.107.226.27:8002/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+    - {name: "27-3", url: "http://10.107.226.27:8003/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+  # 审稿**必须换一个模型** —— 同一个模型审自己写的答案基本全过，六维 review
+  # 就成了摆设。只有一路可用时留空，会退回 generate 池并在跑的时候告警。
   review: []
+  screen: []                  # 闸5 图像质检，留空则复用 generate
+
 llm:
-  temperature: 0.55
-  temperature_review: 0.0
+  temperature: 0.55           # 描述生成。太低句式重复，太高开始编
+  temperature_review: 0.0     # 审稿必须确定
   max_retries: 3
   timeout: 180
-  workers: 0
-  cache_dir: .llm_cache
-  inline_images: false
+  workers: 0                  # 0 = 跟随端点池总并发，不用手算
+  cache_dir: ".llm_cache"     # 按请求哈希缓存，重跑不重复计费
+  inline_images: false        # 远端 API 要 base64 内联；本地服务挂同一块盘就不用
+
+# ---------------------------------------------------------------------------
+# 二、坐标制式 —— **改错了整批框都是废的，而且不报错**
+#
+#   Qwen2-VL / Qwen3-VL  -> relative_1000   归一化到 [0,1000]
+#   Qwen2.5-VL           -> absolute_pixel  smart_resize 之后的绝对像素
+#
+# 两代的约定不兼容：拿 0-1000 的框去训 Qwen2.5-VL，等于把所有目标都标到了
+# 图像左上角那一小块里。跑之前务必确认底座属于哪一系。
+# ---------------------------------------------------------------------------
 coordinate:
-  mode: relative_1000
-  scale: 1000
-  smart_resize:
+  mode: relative_1000         # relative_1000 | absolute_pixel | absolute_source
+  scale: 1000                 # 仅 relative_1000 用
+  smart_resize:               # 仅 absolute_pixel 用，与 Qwen2.5-VL 预处理对齐
     factor: 28
-    min_pixels: 200704
-    max_pixels: 1003520
+    min_pixels: 200704        # 256 * 28 * 28
+    max_pixels: 1003520       # 1280 * 28 * 28
+
+# ---------------------------------------------------------------------------
+# 三、配额
+# ---------------------------------------------------------------------------
 quota:
-  target_per_class: 25000
-  desc_share: 0.6
-  negative_ratio: 0.3
-  balance_warn_ratio: 3.0
+  target_per_class: 25000     # 每个异常类的 QA 总量
+  desc_share: 0.60            # 其中描述+推理占几成，其余归规则侧
+  negative_ratio: 0.30        # 正常样本占比下限
+  balance_warn_ratio: 3.0     # 类间最多/最少超过这个倍数就告警
+
+# ---------------------------------------------------------------------------
+# 四、题型配比。规则侧每张图按这些概率出题，抽不到条件就跳过，不硬凑
+# ---------------------------------------------------------------------------
 tasks:
-  locate_verbal: 0.7
-  negation: 0.2
-  two_turn: 0.3
-  three_turn: 0.35
+  locate_verbal: 0.70         # 定位题里方位指代占七成，坐标占三成
+  negation: 0.20              # 问画面里没有的东西
+  two_turn: 0.30              # 多轮占比
+  three_turn: 0.35            # 多轮里再追到第三轮（"依据是什么"）的比例
   count_box: 0.25
-  count_then_judge: 0.55
-  compose: 0.3
+  count_then_judge: 0.55      # 计数/范围题里过半要追问"那这算正常吗" ——
+                              # 清点是判定的铺垫，问完就断只教模型数数
+  compose: 0.30
   compare: 0.25
-  correct: 0.3
-  temporal: 0.6
-  dense_region: 0.55
-  unanswerable: 0.1
-  chain: 0.3
+  correct: 0.30               # 纠错题。**三成给的是真陈述**，否则模型会学成
+                              # "凡是被问就否定"
+  temporal: 0.60
+  dense_region: 0.55          # 困难负样本的"密集区在哪"（不提"异常"二字）
+  unanswerable: 0.10          # 能力边界声明："单帧看不出火势是否受控"
+                              # 现有开源 VLM 普遍 overclaim，这类样本专治它
+  chain: 0.30                 # 判定 -> 带框描述 -> 异常说明 拼成一条多轮
+
+# ---------------------------------------------------------------------------
+# 五、计数。GT 来自高分辨原图与多帧跟踪，人对着单帧数不出 26 个人头 ——
+# 报准数等于教模型"猜一个像样的数"，这是遥感 VLM 幻觉的主要来源
+# ---------------------------------------------------------------------------
 counting:
-  exact_max: 15
-  few: 6
-  min_area_for_exact: 0.0008
-  area_floor: 0.0002
+  exact_max: 15               # 超过这个数只给量级（"二三十名，密集成片"）
+  few: 6                      # 这么少，哪怕目标偏小也数得过来
+  min_area_for_exact: 0.0008  # 想报准数，中位目标至少占画幅万分之八
+  area_floor: 0.0002          # 低于这个连"看得见"都谈不上，计数题干脆不出
+
+# ---------------------------------------------------------------------------
+# 六、面积占比的说法。**统一到固定档位** —— 百分比/成/分数/模糊量四种混用，
+# 模型学不到稳定映射；而且不按 bbox 面积算的数字全是幻觉
+# ---------------------------------------------------------------------------
 area_buckets:
-- max: 0.05
-  text: 约占画幅不到半成
-- max: 0.15
-  text: 约占画幅一成上下
-- max: 0.3
-  text: 约占画幅两三成
-- max: 0.6
-  text: 约占画幅一半上下
-- max: 1.01
-  text: 覆盖画面大部分区域
+  - {max: 0.05, text: "约占画幅不到半成"}
+  - {max: 0.15, text: "约占画幅一成上下"}
+  - {max: 0.30, text: "约占画幅两三成"}
+  - {max: 0.60, text: "约占画幅一半上下"}
+  - {max: 1.01, text: "覆盖画面大部分区域"}
+
+# ---------------------------------------------------------------------------
+# 七、描述侧面的抽取权重
+# ---------------------------------------------------------------------------
 facets:
   max_per_image: 8
-  skip:
-  - position
+  skip: ["position"]          # 方位已由规则侧的 locate_verbal 覆盖
   weights:
+    grounded: 30              # "文字+图像区域"，训练要求直接对应这一类
     evidence: 25
-    grounded: 30
-    full: 8
-    hard_neg: 40
     scan: 30
-    formation: 18
+    hard_neg: 40              # 困难负样本最值钱，权重给最高
+    full: 8
+    formation: 18             # 以下为各类专属侧面，同类内部 18/18/15/12 递减
     composition: 18
     scale: 15
     site: 12
@@ -96,22 +149,23 @@ facets:
     terrain_change: 18
     affected_objects: 15
     access: 12
+
+# ---------------------------------------------------------------------------
+# 八、质检
+# ---------------------------------------------------------------------------
 review:
-  ratio: 0.3
-  min_score: 4
-  dims:
-  - correct
-  - grounded
-  - facet
-  - instruction
-  - needs_image
-  - no_overclaim
-  batch_per_image: 8
+  ratio: 0.30                 # 抽多大比例送审。1.0 = 全审
+  min_score: 4                # 六维中任一维低于此值即打回
+  dims: ["correct", "grounded", "facet", "instruction", "needs_image", "no_overclaim"]
+  batch_per_image: 8          # 同一张图的样本一次审几条
+
+# ---------------------------------------------------------------------------
+# 九、落盘
+# ---------------------------------------------------------------------------
 output:
-  image_folder: ""            # 留空则写绝对路径; 填了就写相对路径并进 dataset_info 的 media_dir
+  # 填了 image_folder 就写相对路径，并进 dataset_info 的 media_dir ——
+  # 训练机和生成机的挂载点往往不一样，写死绝对路径换台机器就得全文替换
+  image_folder: ""
   relative_paths: true
-  split:
-  - 0.8
-  - 0.1
-  - 0.1
+  split: [0.8, 0.1, 0.1]
   seed: 0
