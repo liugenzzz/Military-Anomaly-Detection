@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -67,8 +68,34 @@ def _load_txt(path: Path) -> dict[int, list[tuple[float, float]]]:
     return per_frame
 
 
+# 官方发布形态: 所有帧平铺在一个 images/ 下, 序列号编在文件名里 ——
+# img001001.jpg = 序列 001 + 帧 001。**不是每个序列一个子目录。**
+_FLAT_RE = re.compile(r"^img(\d{3})(\d{3})$", re.I)
+
+
+def _split_seq_frame(stem: str) -> tuple[str, int] | None:
+    """从文件名拆出 (序列号, 帧号)。认不出来就返回 None, 由调用方回落到目录分组。"""
+    m = _FLAT_RE.match(stem)
+    return (m.group(1), int(m.group(2))) if m else None
+
+
 def _find_ann(ann_root: Path, seq: str) -> Path | None:
-    for pat in (f"{seq}.mat", f"{seq}.txt", f"*{seq}*.mat", f"*{seq}*.txt"):
+    """按序列号找标注。**序列号的写法不止一种** —— 目录分组时是目录名(可能是
+    00001 也可能是 seq01), 平铺时是文件名里的三位数 001, 而 ground_truth 下的
+    文件往往是五位的 00001.mat。逐个试过去, 而不是赌其中一种。
+    """
+    cands = [seq]
+    if seq.isdigit():
+        n = int(seq)
+        cands += [f"{n:05d}", f"{n:04d}", f"{n:03d}", str(n)]
+    seen, pats = set(), []
+    for c in cands:
+        if c in seen:
+            continue
+        seen.add(c)
+        pats += [f"{c}.mat", f"{c}.txt", f"*{c}.mat", f"*{c}.txt",
+                 f"*{c}*.mat", f"*{c}*.txt"]
+    for pat in pats:
         hits = sorted(ann_root.rglob(pat))
         if hits:
             return hits[0]
@@ -79,42 +106,70 @@ def build(root: str, ann_dir: str | None = None, stride: int = 30,
           head_half: float = 8.0, view: str = "uav") -> list[Scene]:
     r = Path(root)
     ann_root = Path(ann_dir) if ann_dir else r
-    # 序列目录: 含图像的子目录
-    seq_dirs = sorted({p.parent for p in iter_images(r)})
-    if not seq_dirs:
+    imgs_all = iter_images(r)
+    if not imgs_all:
         raise RuntimeError(f"{DATASET}: 在 {r} 下找不到图像")
 
+    # 先按文件名分组(官方平铺形态), 认不出来才回落到按目录分组。
+    # 反过来做会踩坑: 平铺时所有帧的 parent 都是同一个 images/, 于是 112 个序列
+    # 被当成一个叫 "images" 的序列, 标注自然找不到 —— 3120 帧全部零目标。
+    groups: dict[str, list[tuple[Path, int | None]]] = defaultdict(list)
+    flat = 0
+    for img in imgs_all:
+        sf = _split_seq_frame(img.stem)
+        if sf:
+            groups[sf[0]].append((img, sf[1]))
+            flat += 1
+        else:
+            groups[img.parent.name].append((img, None))
+    layout = ("文件名(平铺)" if flat == len(imgs_all)
+              else "目录" if flat == 0 else f"混合(平铺 {flat}/{len(imgs_all)})")
+    print(f"[{DATASET}] 序列分组方式: 按{layout}, 共 {len(groups)} 个序列")
+
     scenes, no_ann = [], []
-    for seq in seq_dirs:
-        imgs = iter_images(seq, recursive=False)
-        if not imgs:
-            continue
-        ann = _find_ann(ann_root, seq.name)
+    for seq, items in sorted(groups.items()):
+        ann = _find_ann(ann_root, seq)
         per_frame = {}
         if ann is not None:
             per_frame = _load_mat(ann) if ann.suffix == ".mat" else _load_txt(ann)
         else:
-            no_ann.append(seq.name)
+            no_ann.append(seq)
 
-        W, H = image_size(imgs[0])
-        for k, img in enumerate(imgs):
+        W, H = image_size(items[0][0])
+        for k, (img, fno_name) in enumerate(items):
             if k % stride:
                 continue
-            # 帧号: 优先用文件名尾部数字, 回落到序号
-            digits = "".join(ch for ch in img.stem if ch.isdigit())
-            fno = int(digits[-6:]) if digits else k
-            pts = per_frame.get(fno) or per_frame.get(k) or per_frame.get(k + 1) or []
+            # 帧号优先用文件名解析出来的那个。以前是 int(尾部6位数字), 对
+            # img001001 取出的是 1001 而标注里的帧号是 1 —— 就算标注找到了也对不上。
+            fno = fno_name if fno_name is not None else None
+            if fno is None:
+                digits = "".join(ch for ch in img.stem if ch.isdigit())
+                fno = int(digits[-6:]) if digits else k
+            pts = (per_frame.get(fno) or per_frame.get(k)
+                   or per_frame.get(k + 1) or [])
             objs = [Obj(id=i, cls="person", bbox=b)
                     for i, b in enumerate(points_to_boxes(pts, head_half, W, H))]
             scenes.append(Scene(
-                image_id=f"{DATASET}_{seq.name}_frame{fno:06d}",
+                image_id=f"{DATASET}_{seq}_frame{fno:06d}",
                 image_path=str(img), width=W, height=H,
                 source_dataset=DATASET, license=LICENSE, view=view, objects=objs,
-                meta={"sequence": seq.name, "frame_idx": fno, "head_points": len(pts)}))
+                meta={"sequence": seq, "frame_idx": fno, "head_points": len(pts)}))
 
     if no_ann:
         print(f"[warn] {DATASET}: {len(no_ann)} 个序列找不到标注文件 "
               f"(如 {no_ann[:3]}), 这些帧的人头数为 0, 会被当作正常样本")
     dense = sum(1 for s in scenes if len(s.objects) >= 20)
-    print(f"[{DATASET}] {len(scenes)} 帧(stride={stride}), 其中人头 >=20 的密集帧 {dense}")
+    total = sum(len(s.objects) for s in scenes)
+    print(f"[{DATASET}] {len(scenes)} 帧(stride={stride}), 共 {total} 个人头框, "
+          f"其中人头 >=20 的密集帧 {dense}")
+    # **零目标必须是硬错误。** DroneCrowd 是密集人群数据集, 平均每帧几十上百个
+    # 人头; 全库一个都读不到只可能是标注没对上, 而不是"这批图真的没人"。
+    # 上一版只打一句 warn 就继续, 于是 3120 帧零目标的废数据一路混到了统计报告里。
+    if total == 0:
+        raise RuntimeError(
+            f"{DATASET}: {len(scenes)} 帧一个人头框都没读到 —— 标注没对上。\n"
+            f"  找标注的目录: {ann_root}\n"
+            f"  序列分组方式: 按{layout}, 序列名示例 {sorted(groups)[:3]}\n"
+            f"  官方发布形态是所有帧平铺在 images/ 下(img001001.jpg = 序列001+帧001),\n"
+            f"  标注在 ground_truth/ 下(00001.mat)。确认 --ann-dir 指向标注目录。")
     return scenes

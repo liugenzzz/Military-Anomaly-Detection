@@ -42,10 +42,10 @@ FREE_PROMPT = """你面前是一张航拍或监控画面。请用中文如实描
 不要猜测军事含义，不要推断国别或事件起因。看不清就说看不清。"""
 
 
-def stat_annotations(scenes: list[Scene]) -> dict:
+def stat_annotations(scenes: list[Scene], onto: dict | None = None) -> dict:
     by_ds: dict[str, dict] = defaultdict(lambda: {
         "n": 0, "cls": Counter(), "objs": [], "area": [], "size": Counter(),
-        "events": Counter(), "modality": Counter()})
+        "events": Counter(), "modality": Counter(), "hard_neg": 0, "normal": 0})
     cooc = Counter()
     for s in scenes:
         d = by_ds[s.source_dataset]
@@ -63,8 +63,33 @@ def stat_annotations(scenes: list[Scene]) -> dict:
         if len(types) > 1:
             cooc["+".join(types)] += 1
         if not types:
+            # **"(无事件)" 不等于"没用"。** 困难负样本(规模达标但不含军事目标的
+            # 聚集, 比如 DOTA 的民用停车场)也是无事件, 但它恰恰是最该有的负样本。
+            # 早先报告把两者混在一起显示, 结果 DOTA 的 3181 条看上去像是规则没
+            # 跑通, 差点按"漏了"去改规则。
             d["events"]["(无事件)"] += 1
-    return {"by_dataset": by_ds, "cooccurrence": cooc}
+            if s.meta.get("hard_negative"):
+                d["hard_neg"] += 1
+            else:
+                d["normal"] += 1
+    # 各异常类的产量。**按 image_id 去重** —— ERA 和 ERA-SingleFrames 是同一批
+    # 2173 条素材的两种形态(video / image), 按 scene 数直接加会把它们算两次,
+    # 于是集结、爆炸的产量凭空多出一截, 配额算下来就是虚的。
+    per_class: dict[str, set[str]] = defaultdict(set)
+    for s in scenes:
+        for e in s.events:
+            per_class[e.type].add(s.image_id)
+    counts = {k: len(v) for k, v in per_class.items()}
+    zero = set()
+    if onto:
+        enabled = {c["id"] for c in onto.get("classes", [])
+                   if c["id"] != "normal" and c.get("enabled", True)}
+        zero = enabled - set(counts)
+    twins = [(a, b) for a in by_ds for b in by_ds
+             if a < b and by_ds[a]["n"] == by_ds[b]["n"]
+             and (a.startswith(b) or b.startswith(a))]
+    return {"by_dataset": by_ds, "cooccurrence": cooc,
+            "per_class": counts, "zero_classes": zero, "twins": twins}
 
 
 def _pct(v: list[float], q: float) -> float:
@@ -93,8 +118,27 @@ def report(stats: dict) -> str:
         out.append(f"- 图像尺寸(前 3): {dict(d['size'].most_common(3))}")
         out.append(f"- 类别(前 8): {dict(d['cls'].most_common(8))}")
         out.append(f"- 事件: {dict(d['events'].most_common(6))}")
+        if d["hard_neg"] or d["normal"]:
+            out.append(f"  - 无事件的 {d['hard_neg'] + d['normal']} 条里: "
+                       f"困难负样本 {d['hard_neg']}, 普通正常样本 {d['normal']}")
+            if d["hard_neg"] and not d["events"].get("(无事件)", 0) - d["hard_neg"]:
+                out.append("    (这一批全是困难负样本 —— 规模够但不含军事目标, "
+                           "是负样本不是漏判)")
     if stats["cooccurrence"]:
         out.append(f"\n## 多类共现\n{dict(stats['cooccurrence'].most_common(10))}")
+    if stats.get("per_class"):
+        out.append("\n## 各异常类产量（去重后的独立素材数）")
+        for cls, n in sorted(stats["per_class"].items(), key=lambda kv: -kv[1]):
+            out.append(f"- {cls}: {n}")
+        for a, b in stats.get("twins", []):
+            out.append(f"\n**{a} 与 {b} 条数相同且同名前缀 —— 很可能是同一批素材的"
+                       f"两种形态(video / 抽帧)。上面的产量已按 image_id 去重, "
+                       f"但排配额时也别把它们当成两份独立数据。**")
+        if stats.get("zero_classes"):
+            out.append(f"\n**本体里启用但一条都没触发的类: "
+                       f"{sorted(stats['zero_classes'])}** —— 要么规则太严, "
+                       f"要么根本没有数据源。开跑前必须先解决, 否则产出的数据集"
+                       f"少了这几类。")
     return "\n".join(out)
 
 
@@ -115,13 +159,20 @@ def main() -> None:
                     action="store_true", default=None)
     ap.add_argument("--no-inline-images", dest="inline_images", action="store_false",
                     help="改用 file:// 让推理机自己读盘(需要 --allowed-local-media-path)")
+    ap.add_argument("--ontology", default="configs/ontology.yaml",
+                    help="用来核对「启用了但一条都没触发」的类")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
     scenes = load_scenes(args.scenes)
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    stats = stat_annotations(scenes)
+    onto = None
+    op = Path(args.ontology)
+    if op.exists():
+        import yaml
+        onto = yaml.safe_load(op.read_text(encoding="utf-8"))
+    stats = stat_annotations(scenes, onto)
     (out / "annotation_stats.md").write_text(report(stats), encoding="utf-8")
     print(report(stats))
     print(f"\n-> {out / 'annotation_stats.md'}")

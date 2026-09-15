@@ -16,7 +16,7 @@
 #   - v0.2.1: 军用/民用目标分开命名(military-plane vs civil-plane),
 #     民用机场机群与民用港口因此成为困难负样本而非误标为集结
 
-version: "0.5.0"
+version: "0.5.1"
 box_scale: 1000                 # grounding 坐标归一化上限, Qwen-VL 系列用 1000
 negative_ratio_target: 0.30     # normal 样本占比下限
 qa_per_anomaly_target: 25000    # 每个异常类的 QA 条数目标
@@ -128,8 +128,18 @@ classes:
 
   - id: disaster
     zh: 灾害现场
-    enabled: true
-    # v0.5.0 新增。ERA 的 flood / landslide / mudslide / post_earthquake /
+    enabled: false
+    # v0.5.1 停用。**理由不是规则不成立，是没有数据。**
+    # 全库扫下来 disaster 事件数为 0：能贡献这一类的只有 ERA 的
+    # flood/landslide/mudslide/post_earthquake/traffic_collision 几个标签，
+    # 而 ERA 全库只有 2173 条（且 video 与 SingleFrames 是同一批，不能算两次），
+    # 落到这五个标签上所剩无几。公开数据里合适的源（FloodNet / RescueNet /
+    # xBD）都需要另外下载，本轮不引入。
+    # 规则和 prompt 都原样留着：哪天补上数据源，把 enabled 改回 true 即可，
+    # 不必重写。
+    #
+    # 以下为原始设计说明（仍然有效）：
+    # ERA 的 flood / landslide / mudslide / post_earthquake /
     # traffic_collision 原本被整个排除, 理由是"画面常含烟尘火光, 既不能当异常
     # 也不能当正常"。但那个理由只在它们**没有自己的类别**时成立 —— 单列一类,
     # 歧义就消失了: 它们不再是"说不清算不算异常", 而是明确的第五类。
