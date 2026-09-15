@@ -404,14 +404,26 @@ def clip_boxes_to_tile(objs: list[tuple[str, list[float]]], tile: dict[str, Any]
 # ---------------------------------------------------------------- 杂项
 def points_to_boxes(points: list[tuple[float, float]], half: float = 8.0,
                     w: int = 0, h: int = 0) -> list[list[float]]:
-    """点标注(如 DroneCrowd 的人头点)转小方框, 便于统一走 bbox 逻辑。"""
+    """点标注(如 DroneCrowd 的人头点)转小方框, 便于统一走 bbox 逻辑。
+
+    **落在画幅外的点要丢掉, 不能硬裁。** 点在 x <= -half 处时, 裁剪后
+    x1 = max(0, x-half) = 0 而 x2 = min(w, x+half) 仍是负数 —— 得到一个 x2 < x1
+    的退化框。DroneCrowd 46.7 万个人头点里就有这么一个, 一路混到坐标自检才被
+    发现。这种框喂进训练是纯噪声, 而且下游算面积会得到负数。
+    """
     out = []
     for x, y in points:
+        if w and not (-half < x < w + half):
+            continue                               # 整个框都在画幅外
+        if h and not (-half < y < h + half):
+            continue
         x1, y1, x2, y2 = x - half, y - half, x + half, y + half
         if w:
             x1, x2 = max(0.0, x1), min(float(w), x2)
         if h:
             y1, y2 = max(0.0, y1), min(float(h), y2)
+        if x2 - x1 < 1.0 or y2 - y1 < 1.0:
+            continue                               # 贴边只剩一条线, 同样没有意义
         out.append([x1, y1, x2, y2])
     return out
 

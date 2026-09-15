@@ -84,7 +84,8 @@ def derive_density_cluster(scene: Scene, rule: dict[str, Any], cls_id: str,
     targets = {c.lower() for c in rule["target_classes"]}
     objs = scene.of_classes(targets)
     if len(objs) < rule["min_cluster_size"]:
-        return _veto(cls_id, f"目标数不足(<{rule['min_cluster_size']})")
+        return _veto(cls_id, "数据源无此类目标" if not objs
+                     else f"目标数不足({len(objs)}<{rule['min_cluster_size']})")
 
     # 交通否决: 同框有成规模的车辆/摩托 -> 这是城市街景的人流, 不是聚集
     veto_cls = {c.lower() for c in rule.get("traffic_veto_classes", [])}
@@ -198,9 +199,11 @@ def reject_report() -> str:
     for cls_id in sorted(REJECTS):
         items = REJECTS[cls_id].most_common()
         out.append(f"  {cls_id}: " + ", ".join(f"{k} {v}" for k, v in items))
-    out.append("  ↑ 「不含军事目标」占多数 = 规则没问题, 是数据里没有这类目标, "
-               "改 require_any 或换数据源;")
-    out.append("    「目标数不足」占多数 = 门槛高了或该类素材本来就稀, "
+    out.append("  ↑ 「数据源无此类目标」= 这批数据压根不含该规则要的标注, "
+               "正常, 不用管;")
+    out.append("    「不含军事目标」占多数 = 队形/规模都够, 只差 require_any, "
+               "改一行配置就能放出来;")
+    out.append("    「目标数不足」「单簇规模不足」占多数 = 门槛高了或素材本来就稀, "
                "先看 relax 档能捡回多少。")
     return "\n".join(out)
 
@@ -220,7 +223,11 @@ def derive_linear_formation(scene: Scene, rule: dict[str, Any], cls_id: str,
     targets = {c.lower() for c in rule["target_classes"]}
     objs = scene.of_classes(targets)
     if len(objs) < rule["min_count"]:
-        return _veto(cls_id, f"目标数不足({len(objs)}<{rule['min_count']})")
+        # 一个都没有 ≠ 有但不够。前者说明这个数据源压根不含这类标注(比如
+        # DroneCrowd 只有人头点, 没有车), 属于"本来就轮不到这条规则", 不是被否决;
+        # 混在一起报会把真正该看的信号淹掉。
+        return _veto(cls_id, "数据源无此类目标" if not objs
+                     else f"目标数不足({len(objs)}<{rule['min_count']})")
     centers = [o.center for o in objs]
 
     r2 = _r_squared(centers)
