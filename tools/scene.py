@@ -47,6 +47,10 @@ class Event:
     evidence: dict[str, Any] = field(default_factory=dict)
 
 
+VIDEO_EXT = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv",
+             ".m4v", ".mpg", ".mpeg"}
+
+
 @dataclass
 class Scene:
     image_id: str
@@ -80,6 +84,22 @@ class Scene:
     @property
     def n_media(self) -> int:
         return len(self.media[1])
+
+    @property
+    def still(self) -> str | None:
+        """给 VLM 看的那张静止图。**取图一律走这里, 别直接用 image_path。**
+
+        ERA 那批是 video 模态, image_path 指向 .mp4。直接当图内联等于把几 MB 的
+        视频 base64 塞进上下文, 服务端回一句 400 超 max_model_len —— 错误信息里
+        完全看不出真因是"你把视频当图发了"。
+        有抽帧就用中间那帧(比首帧有代表性), 纯视频且一帧都没有就返回 None,
+        由调用方跳过。
+        """
+        if self.frames:
+            return self.frames[len(self.frames) // 2]
+        if Path(self.image_path).suffix.lower() in VIDEO_EXT:
+            return None
+        return self.image_path
 
     @property
     def diag(self) -> float:

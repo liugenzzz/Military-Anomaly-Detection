@@ -410,6 +410,15 @@ class LLM:
         raise RuntimeError(f"LLM 调用失败({url}): {last}")
 
 
+# 视频后缀。**这几个绝不能当图片内联** —— 一个几 MB 的 mp4 被 base64 塞进
+# 请求体, 服务端只会回一句 400 超 max_model_len, 根本看不出真正的原因是
+# "你把视频当图发了"。
+VIDEO_EXT = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".m4v", ".mpg", ".mpeg"}
+IMAGE_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+              ".webp": "image/webp", ".bmp": "image/bmp", ".gif": "image/gif",
+              ".tif": "image/tiff", ".tiff": "image/tiff"}
+
+
 def _shrink(path: Path, max_side: int, quality: int) -> tuple[bytes, str] | None:
     """大图先缩到 max_side 再内联。
 
@@ -434,6 +443,22 @@ def _shrink(path: Path, max_side: int, quality: int) -> tuple[bytes, str] | None
         return None                                      # 读不了就原样传, 让服务端报
 
 
+def drop_blind(scenes: list, what: str) -> list:
+    """剔除拿不到静止图的 scene(纯视频且没抽帧)。
+
+    留着它们的后果比想象的严重: image_message 收到 None 会**退成纯文字请求**,
+    模型一眼没看就得写描述, 写出来的全是编的 —— 而且这些条目和正常样本混在
+    一起, 事后根本分不出来。宁可少几条, 不能混进看不见图的描述。
+    """
+    blind = [x for x in scenes if x.still is None]
+    if blind:
+        from collections import Counter
+        by = Counter(x.source_dataset for x in blind)
+        print(f"  跳过 {len(blind)} 个拿不到静止图的 scene({what}): {dict(by)}")
+        print("    这些是纯视频且没抽帧。留着它们等于让模型不看图硬写。")
+    return [x for x in scenes if x.still is not None]
+
+
 def image_message(text: str, image_path: str | None, inline: bool,
                   max_side: int | None = None, quality: int | None = None) -> list[dict]:
     if not image_path:
@@ -441,6 +466,11 @@ def image_message(text: str, image_path: str | None, inline: bool,
     max_side = MAX_IMAGE_SIDE if max_side is None else max_side
     quality = IMAGE_QUALITY if quality is None else quality
     p = Path(image_path)
+    if p.suffix.lower() in VIDEO_EXT:
+        raise ValueError(
+            f"这是视频不是图: {image_path}\n"
+            f"  想让模型看它, 要么抽帧后传帧, 要么走 /v1/chat/completions 的 video_url "
+            f"(需要服务端支持)。\n  直接当图内联只会撞 400 超 max_model_len。")
     if inline and not p.exists():
         # **要内联却找不到文件, 就地报错。** 以前这里是 `if inline and p.exists()`,
         # 文件不在就悄悄滑到下面的 file:// 分支, 服务端再回一个 400 或者干脆断连 ——
@@ -453,7 +483,9 @@ def image_message(text: str, image_path: str | None, inline: bool,
             raw, mime = small
         else:
             raw = p.read_bytes()
-            mime = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
+            # 以前只分 png / 其余一律 image/jpeg。webp、bmp、tiff 被谎报成 jpeg,
+            # 服务端解码失败时报的错跟内容毫无关系, 很难查。
+            mime = IMAGE_MIME.get(p.suffix.lower(), "image/jpeg")
         b64 = base64.b64encode(raw).decode()
         url = f"data:{mime};base64,{b64}"
     else:
@@ -502,12 +534,12 @@ def load_scenes_excluding(path: str, exclude_file: str | None) -> list[Scene]:
 
 def cmd_screen(args, onto):
     tmpl = load_prompt("screen_image.txt", args.prompt_dir + "/_tools")
-    scenes = load_scenes_excluding(args.scenes, args.exclude_ids)
+    scenes = drop_blind(load_scenes_excluding(args.scenes, args.exclude_ids), "闸5 质检")
     zh = {c["id"]: c["zh"] for c in onto["classes"]}
 
     def make(s: Scene) -> dict:
         claimed = "、".join(zh.get(t, t) for t in s.anomaly_types) or "无异常的正常场景"
-        return {"image_id": s.image_id, "image_path": s.image_path,
+        return {"image_id": s.image_id, "image_path": s.still,
                 "prompt": tmpl.format(claimed=claimed)}
 
     reqs = [make(s) for s in scenes]
@@ -800,7 +832,7 @@ def cmd_generate(args, onto):
     reason_tmpl = load_prompt("reason_gen.txt", args.prompt_dir + "/_tools")
     facets, _ = load_all(args.prompt_dir)
     zh = {c["id"]: c["zh"] for c in onto["classes"]}
-    scenes = load_scenes_excluding(args.scenes, args.exclude_ids)
+    scenes = drop_blind(load_scenes_excluding(args.scenes, args.exclude_ids), "描述生成")
     rng = random.Random(args.seed)
     cls_total0: dict[str, int] = {}
     for sc in scenes:
@@ -852,7 +884,7 @@ def cmd_generate(args, onto):
                 region = {"box_1000": to_bbox2d(box, s.width, s.height), "label": label}
             reqs.append({
                 "region": region,
-                "image_id": s.image_id, "image_path": s.image_path,
+                "image_id": s.image_id, "image_path": s.still,
                 "media_field": s.media[0], "media": s.media[1],
                 "modality": s.modality, "kind": "describe", "facet": fa.kind, "anomaly": anomaly,
                 "question": q, "must_not": bans, "facts": facts,
@@ -873,7 +905,7 @@ def cmd_generate(args, onto):
             _, asks = load_all(args.prompt_dir)
             rq = rng.choice(asks["reason"].lines).replace("{zh}", zh.get(anomaly, "异常"))
             reqs.append({
-                "image_id": s.image_id, "image_path": s.image_path,
+                "image_id": s.image_id, "image_path": s.still,
                 "media_field": s.media[0], "media": s.media[1],
                 "modality": s.modality, "kind": "reason", "facet": "reason", "anomaly": anomaly,
                 "question": rq, "must_not": [], "facts": facts,

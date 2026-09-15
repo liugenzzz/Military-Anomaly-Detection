@@ -148,14 +148,19 @@ def main() -> None:
         picked += p[:args.per_class]
     # 先查一遍文件在不在。模型调用是贵的, 路径检查是免费的 —— 拿几十次
     # 失败的推理去发现"图根本不在盘上", 是这个项目已经栽过的坑。
-    missing = [s for s in picked if not Path(s.image_path).exists()]
+    novideo = [s for s in picked if s.still is None]
+    if novideo:
+        print(f"\n  {len(novideo)}/{len(picked)} 个是纯视频且没抽帧, 跳过自由看图"
+              f"({novideo[0].source_dataset} 等)。视频当图发只会撞 400。")
+        picked = [s for s in picked if s.still is not None]
+    missing = [s for s in picked if not Path(s.still).exists()]
     if missing:
         print(f"\n⚠ {len(missing)}/{len(picked)} 张抽中的图在盘上找不到, 已剔除:")
         for s in missing[:5]:
-            print(f"    {s.image_id}: {s.image_path}")
+            print(f"    {s.image_id}: {s.still}")
         if len(missing) > 5:
             print(f"    … 还有 {len(missing) - 5} 张")
-        picked = [s for s in picked if Path(s.image_path).exists()]
+        picked = [s for s in picked if Path(s.still).exists()]
     if not picked:
         raise SystemExit("抽中的图一张都不在盘上, 先确认 scenes 里的 image_path "
                          "是相对哪个目录写的。")
@@ -183,7 +188,7 @@ def main() -> None:
 
     def run(s: Scene):
         msg = [{"role": "user",
-                "content": image_message(FREE_PROMPT, s.image_path, args.inline_images)}]
+                "content": image_message(FREE_PROMPT, s.still, args.inline_images)}]
         try:
             ans = llm.chat(msg, json_mode=False).strip()
         except Exception as e:                            # noqa: BLE001
@@ -210,7 +215,7 @@ def main() -> None:
         probe = run(picked[0])
     if probe["model_sees"].startswith("[调用失败]"):
         print(f"\n预检失败, 已中止 —— 不再把 {len(picked)} 条错误信息写成报告。")
-        print(f"  图: {picked[0].image_path}")
+        print(f"  图: {picked[0].still}")
         print(f"  {probe['model_sees']}")
         print("\n先跑 `python tools/llm_qa.py ping` 确认端点; 如果 ping 全绿而这里"
               "仍失败,\n  多半是图像传法不对: 默认 base64 内联, 若你显式加了"

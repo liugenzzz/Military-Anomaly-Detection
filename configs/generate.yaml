@@ -34,11 +34,22 @@ endpoints:
   # 每一路都可以单独写 max_tokens / timeout / chat_template_kwargs 覆盖
   # 下面 llm: 段里的默认值，不写就用默认。
   generate:
-    - {name: "27-1", url: "http://10.107.226.27:8001/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
-    - {name: "27-2", url: "http://10.107.226.27:8002/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
-    - {name: "27-3", url: "http://10.107.226.27:8003/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+    - {name: "59-1", url: "http://10.107.230.59:8001/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+    - {name: "59-2", url: "http://10.107.230.59:8002/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+    - {name: "59-3", url: "http://10.107.230.59:8003/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+    - {name: "59-4", url: "http://10.107.230.59:8004/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+    - {name: "103-1", url: "http://10.200.100.103:8001/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+    - {name: "103-2", url: "http://10.200.100.103:8002/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+    - {name: "103-3", url: "http://10.200.100.103:8003/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+    - {name: "103-4", url: "http://10.200.100.103:8004/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+    - {name: "7-1", url: "http://10.107.238.7:8001/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+    - {name: "7-2", url: "http://10.107.238.7:8002/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+    - {name: "7-3", url: "http://10.107.238.7:8003/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
+    - {name: "7-4", url: "http://10.107.238.7:8004/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
   # 审稿**必须换一个模型** —— 同一个模型审自己写的答案基本全过，六维 review
-  # 就成了摆设。只有一路可用时留空，会退回 generate 池并在跑的时候告警。
+  # 就成了摆设。这 12 路是同一个 Qwen3.8-27B，所以**分几路出来当 review 并不解决
+  # 问题**，只是换了张嘴说同样的话。留空，跑的时候会照常告警；真要六维审稿，
+  # 得再接一个不同的模型进来。
   review: []
   screen: []                  # 闸5 图像质检，留空则复用 generate
 
@@ -47,7 +58,9 @@ llm:
   temperature_review: 0.0     # 审稿必须确定
   max_retries: 3
   timeout: 600                # 秒。看图 + 长回答比纯文本慢得多，180 会误杀
-  max_tokens: 4096
+  max_tokens: 4096            # 单次回答上限。上下文 128k 是**输入+输出**共用的，
+                              # 这一项只管输出；输入侧的账见 max_image_side。
+  context_window: 131072      # 服务端起的 128k。用来算"一次能塞几张图"，见下。
   workers: 0                  # 0 = 跟随端点池总并发，不用手算
   cache_dir: ".llm_cache"     # 按请求哈希缓存，重跑不重复计费
   # true = 图片转 base64 塞进请求体；false = 只发 file:// 路径，让推理机自己读盘。
