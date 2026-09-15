@@ -31,6 +31,8 @@
 # enabled: false 用来临时停用某一路，不用删配置。
 # ---------------------------------------------------------------------------
 endpoints:
+  # 每一路都可以单独写 max_tokens / timeout / chat_template_kwargs 覆盖
+  # 下面 llm: 段里的默认值，不写就用默认。
   generate:
     - {name: "27-1", url: "http://10.107.226.27:8001/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
     - {name: "27-2", url: "http://10.107.226.27:8002/v1/chat/completions", model: "Qwen3.8-27B", key: "local-pool-key", concurrency: 4}
@@ -44,10 +46,23 @@ llm:
   temperature: 0.55           # 描述生成。太低句式重复，太高开始编
   temperature_review: 0.0     # 审稿必须确定
   max_retries: 3
-  timeout: 180
+  timeout: 600                # 秒。看图 + 长回答比纯文本慢得多，180 会误杀
+  max_tokens: 4096
   workers: 0                  # 0 = 跟随端点池总并发，不用手算
   cache_dir: ".llm_cache"     # 按请求哈希缓存，重跑不重复计费
   inline_images: false        # 远端 API 要 base64 内联；本地服务挂同一块盘就不用
+  max_image_side: 1280        # 内联前把长边缩到这个数（0=不缩，需要 Pillow）。
+                              # Qwen-VL 服务端本来就按 max_pixels=1280*28*28 缩回去，
+                              # DOTA 那种 4000x4000 原图传全尺寸只是白费带宽。
+  image_jpeg_quality: 88
+
+  # ---- 关思维链 ----------------------------------------------------------
+  # Qwen3 系列默认先输出思维链。不关的话 content 里全是"我们需要回答用户：…"
+  # 这种推理痕迹，json_mode 一条都解析不出来；开了 reasoning parser 的服务端
+  # 会把它放进 reasoning_content，content 干净但可能整个是空的。
+  # 两种情况代码里都兜了（strip_reasoning + 空内容报错），但**源头关掉最省事**。
+  # 要保留思维链就把这一项设成 {} 。每路端点可以各写各的覆盖这里。
+  chat_template_kwargs: {enable_thinking: false}
 
 # ---------------------------------------------------------------------------
 # 二、坐标制式 —— **改错了整批框都是废的，而且不报错**

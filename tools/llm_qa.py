@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import io
 import json
 import os
 import random
@@ -180,6 +181,11 @@ def build_facts(scene: Scene, onto: dict[str, Any], max_objects: int = 30) -> di
 # ---------------------------------------------------------------- LLM 客户端
 DEFAULT_MODEL = "Qwen3.8-27B"        # 与自建推理池同一套服务
 
+# 内联大图前先缩到的长边。0 = 不缩。由 load_endpoints 从 llm.max_image_side 读入,
+# 这样四个调用点不用各传一遍。
+MAX_IMAGE_SIDE = 0
+IMAGE_QUALITY = 88
+
 
 @dataclass
 class Endpoint:
@@ -196,12 +202,21 @@ class Endpoint:
     key: str = ""
     concurrency: int = 4
     name: str = ""
+    max_tokens: int = 4096
+    timeout: int = 600
+    # 推理型模型(Qwen3 系列)默认会先输出思维链。不关掉的话 content 里全是
+    # "我们需要回答用户：..." 这种推理痕迹, json_mode 直接解析失败。
+    # 服务端开了 reasoning parser 时思维链落在 reasoning_content, content 是干净的;
+    # 没开 parser 时 <think>...</think> 原样留在 content 里 —— 两种都要防。
+    chat_template_kwargs: dict | None = None
 
     def __post_init__(self):
         u = self.url.strip().rstrip("/")
         self.chat_url = u if u.endswith("/chat/completions") else u + "/chat/completions"
         self.models_url = self.chat_url[: -len("/chat/completions")] + "/models"
         self.name = self.name or self.chat_url
+        if self.chat_template_kwargs is None:
+            self.chat_template_kwargs = {"enable_thinking": False}
 
 
 def load_endpoints(path: str | None, role: str, model: str,
@@ -220,10 +235,20 @@ def load_endpoints(path: str | None, role: str, model: str,
         group = src.get(role)
         if group is None:
             group = src.get("generate") or []
+        llm_cfg = cfg.get("llm") or {}
+        global MAX_IMAGE_SIDE, IMAGE_QUALITY
+        MAX_IMAGE_SIDE = int(llm_cfg.get("max_image_side", 0) or 0)
+        IMAGE_QUALITY = int(llm_cfg.get("image_jpeg_quality", 88))
         out = [Endpoint(url=e["url"], model=e.get("model", model),
                         key=str(e.get("key", "")),
                         concurrency=int(e.get("concurrency", 4)),
-                        name=e.get("name", ""))
+                        name=e.get("name", ""),
+                        max_tokens=int(e.get("max_tokens",
+                                             llm_cfg.get("max_tokens", 4096))),
+                        timeout=int(e.get("timeout", llm_cfg.get("timeout", 600))),
+                        chat_template_kwargs=e.get(
+                            "chat_template_kwargs",
+                            llm_cfg.get("chat_template_kwargs")))
                for e in group if e.get("enabled") is not False]
         if out:
             return out
@@ -234,6 +259,51 @@ def load_endpoints(path: str | None, role: str, model: str,
         "  - 配置文件:  --endpoints configs/generate.yaml   (默认就读它)\n"
         "  - 或单地址:  --base-url http://10.107.226.27:8001/v1/chat/completions\n"
         "先跑 `python tools/llm_qa.py ping` 确认每一路通不通。")
+
+
+# ---------------------------------------------------------------- 思维链 / 报错体
+# 推理型模型默认吐思维链。服务端开了 reasoning parser 时它落在
+# message.reasoning_content, content 干净; 没开 parser 时 <think>...</think>
+# 原样留在 content 里, 必须在解析 JSON 之前剥掉, 否则 json_mode 永远失败。
+_THINK_TAG = r"think|thinking|reasoning|reason"
+_THINK_BLOCK = re.compile(rf"<\s*({_THINK_TAG})\s*>.*?<\s*/\s*\1\s*>", re.I | re.S)
+_THINK_CLOSE = re.compile(rf"^.*<\s*/\s*(?:{_THINK_TAG})\s*>", re.I | re.S)
+_THINK_OPEN = re.compile(rf"<\s*(?:{_THINK_TAG})\s*>", re.I)
+
+
+def strip_reasoning(text: str) -> str:
+    """剥掉思维链, 只留最终回答。"""
+    if not text:
+        return ""
+    out = _THINK_BLOCK.sub("", text)
+    if _THINK_CLOSE.search(out):                 # 只有闭合标签: 丢掉它之前的一切
+        out = _THINK_CLOSE.sub("", out, count=1)
+    m = _THINK_OPEN.search(out)
+    if m:                                        # 只有开标签: 被 max_tokens 截断了
+        out = out[: m.start()]
+    return out.strip()
+
+
+def http_detail(e: Exception) -> str:
+    """把服务端的报错体抠出来。
+
+    urllib 的 HTTPError 字符串只有 "HTTP Error 500: Internal Server Error",
+    真正有用的 traceback 在 body 里。以前这里只打 str(e)[:90], 于是图像检查
+    报 500 时完全看不出是图太小、是 --limit-mm-per-prompt 没开、还是模型没视觉层。
+    """
+    import urllib.error
+    if isinstance(e, urllib.error.HTTPError):
+        try:
+            body = e.read().decode("utf-8", "replace")
+        except Exception:                        # noqa: BLE001
+            body = ""
+        hint = {401: "  ← key 不对或没发送",
+                403: "  ← key 没权限",
+                404: "  ← url 或 model 名不对, 确认与 --served-model-name 一致",
+                400: "  ← 请求体被拒, 常见是超 max_model_len / max_tokens 过大",
+                500: "  ← 服务端内部异常, 报错体见下"}.get(e.code, "")
+        return f"HTTP {e.code}{hint}: {body[:600] or '(空)'}"
+    return f"{type(e).__name__}: {e}"
 
 
 class LLM:
@@ -300,38 +370,89 @@ class LLM:
             ep = self.pick()
             url = ep.chat_url                    # 原样用, 不拼不猜
             payload["model"] = ep.model          # 每路的模型名可能不同
+            payload["max_tokens"] = ep.max_tokens
+            if ep.chat_template_kwargs:          # 关思考, 见 Endpoint 注释
+                payload["chat_template_kwargs"] = ep.chat_template_kwargs
             try:
                 req = urllib.request.Request(
                     url,
                     data=json.dumps(payload).encode("utf-8"),
                     headers={"Content-Type": "application/json",
                              "Authorization": f"Bearer {ep.key}"})
-                with urllib.request.urlopen(req, timeout=180) as r:
-                    content = json.loads(r.read())["choices"][0]["message"]["content"]
+                with urllib.request.urlopen(req, timeout=ep.timeout) as r:
+                    msg = json.loads(r.read())["choices"][0].get("message") or {}
+                content = strip_reasoning(msg.get("content") or "")
+                if not content:
+                    # 回答全落在思维链里 —— 没关思考且被 max_tokens 截断
+                    if str(msg.get("reasoning_content") or "").strip():
+                        raise RuntimeError(
+                            f"{ep.name} 只返回了思维链没返回答案 —— "
+                            f"确认端点的 chat_template_kwargs.enable_thinking=false, "
+                            f"或把 max_tokens({ep.max_tokens}) 调大")
+                    raise RuntimeError(f"{ep.name} 返回了空内容")
                 if cache_file:
                     cache_file.write_text(json.dumps({"content": content}, ensure_ascii=False),
                                           encoding="utf-8")
                 return content
             except Exception as e:                       # noqa: BLE001
-                last = e
-                if isinstance(e, OSError) and len(self.pool) > 1:
-                    self.dead.add(url)       # 连不上的那一路摘掉, 别再往里发
+                last = http_detail(e)
+                import urllib.error
+                # 连不上的那一路摘掉, 别再往里发。**HTTPError 不算连不上** ——
+                # 服务端应答了, 只是这一条请求被拒, 摘掉整路是误伤。
+                if (isinstance(e, OSError)
+                        and not isinstance(e, urllib.error.HTTPError)
+                        and len(self.pool) > 1):
+                    self.dead.add(url)
                 time.sleep(2 ** attempt)
         raise RuntimeError(f"LLM 调用失败({url}): {last}")
 
 
-def image_message(text: str, image_path: str | None, inline: bool) -> list[dict]:
+def _shrink(path: Path, max_side: int, quality: int) -> tuple[bytes, str] | None:
+    """大图先缩到 max_side 再内联。
+
+    DOTA 那种 4000x4000 的原图 base64 之后是十几 MB, 一是网络来回慢, 二是
+    服务端 Qwen-VL 本来就会按 max_pixels = 1280*28*28 缩回去, 传全尺寸纯属浪费。
+    没装 Pillow 就原样传, 不因为缺个依赖就跑不动。
+    """
+    try:
+        from PIL import Image                            # type: ignore
+    except ImportError:
+        return None
+    try:
+        with Image.open(path) as im:
+            if max(im.size) <= max_side:
+                return None
+            im = im.convert("RGB")
+            im.thumbnail((max_side, max_side))
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=quality, optimize=True)
+            return buf.getvalue(), "image/jpeg"
+    except Exception:                                    # noqa: BLE001
+        return None                                      # 读不了就原样传, 让服务端报
+
+
+def image_message(text: str, image_path: str | None, inline: bool,
+                  max_side: int | None = None, quality: int | None = None) -> list[dict]:
     if not image_path:
         return [{"type": "text", "text": text}]
+    max_side = MAX_IMAGE_SIDE if max_side is None else max_side
+    quality = IMAGE_QUALITY if quality is None else quality
     p = Path(image_path)
     if inline and p.exists():
-        mime = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
-        b64 = base64.b64encode(p.read_bytes()).decode()
+        small = _shrink(p, max_side, quality) if max_side else None
+        if small:
+            raw, mime = small
+        else:
+            raw = p.read_bytes()
+            mime = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
+        b64 = base64.b64encode(raw).decode()
         url = f"data:{mime};base64,{b64}"
     else:
         url = str(p)
-    return [{"type": "image_url", "image_url": {"url": url}},
-            {"type": "text", "text": text}]
+    # 文字在前、图在后。Qwen 的 chat template 对两种顺序都能渲染, 但参考项目
+    # (book_cpt/services/clients.py)跑通的是这个顺序, 保持一致省得踩模板差异。
+    return [{"type": "text", "text": text},
+            {"type": "image_url", "image_url": {"url": url}}]
 
 
 def parse_json(text: str) -> dict[str, Any] | None:
@@ -547,6 +668,23 @@ def plan_quota(scenes: list[Scene], facets: dict[str, list[Facet]], target: int,
     return plan
 
 
+def _solid_png(w: int, h: int, rgb: tuple[int, int, int]) -> bytes:
+    """纯 stdlib 生成一张 w*h 的单色 PNG, 不依赖 Pillow。ping 的测试图用。"""
+    import struct
+    import zlib
+    raw = b"".join(b"\x00" + bytes(rgb) * w for _ in range(h))
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        body = tag + data
+        return (struct.pack(">I", len(data)) + body
+                + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF))
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 9))
+            + chunk(b"IEND", b""))
+
+
 def cmd_ping(args, onto):
     if not args.endpoints and Path("configs/generate.yaml").exists():
         args.endpoints = "configs/generate.yaml"
@@ -559,16 +697,19 @@ def cmd_ping(args, onto):
       2. 服务的模型名叫什么 —— vLLM 的 model 字段必须和 --served-model-name 完全一致,
                              常见坑是服务端用的是模型路径而配置里写的是简称
       3. 文本能不能生成
-      4. **认不认图**       —— 发一张 1x1 的内联图试一次。纯文本模型在这套流程里
-                             只能写描述、读不了图, 必须提前发现
+      4. **认不认图**       —— 发一张 504x504 的纯红测试图, 问它什么颜色。
+                             答不上来的那一路只能写纯文本, 描述题不能用它。
+
+    测试图为什么是 504x504 而不是随手一张 1x1:
+      Qwen-VL 的图像预处理有个下限 min_pixels = 256*28*28 = 200704。
+      小于这个尺寸的图进到 patch embedding 会直接在服务端炸掉, vLLM 回的是
+      **HTTP 500**(服务端异常)而不是 400(请求非法) —— 看起来就像"多模态模型
+      读不了图", 其实是测试图不合法。504 = 18*28, 面积 254016, 稳稳过线。
     """
     import base64
     import urllib.request
 
-    tiny_png = base64.b64encode(bytes.fromhex(
-        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
-        "890000000a49444154789c6360000002000100ffff030000060005"
-        "57bfabd40000000049454e44ae426082")).decode()
+    probe_png = base64.b64encode(_solid_png(504, 504, (214, 40, 40))).decode()
 
     for role in ("generate", "review", "screen"):
         pool = load_endpoints(args.endpoints, role, args.model, args.base_url)
@@ -619,14 +760,23 @@ def cmd_ping(args, onto):
             # 3) 认不认图
             try:
                 msg = [{"role": "user", "content": [
+                    {"type": "text", "text": "这张图是什么颜色？只答颜色两个字。"},
                     {"type": "image_url",
-                     "image_url": {"url": f"data:image/png;base64,{tiny_png}"}},
-                    {"type": "text", "text": "这是什么颜色？"}]}]
-                one.chat(msg, json_mode=False)
-                print("      ✓ 接受图像输入")
+                     "image_url": {"url": f"data:image/png;base64,{probe_png}"}}]}]
+                ans = one.chat(msg, json_mode=False).strip()
+                # 答对颜色才算真看见了。有些纯文本模型会把图默默丢掉然后瞎猜一个,
+                # 不核对内容的话这一路会被误判成可用。
+                seen = "红" in ans
+                print(f"      {'✓' if seen else '?'} 接受图像输入: {ans[:30]}"
+                      + ("" if seen else "   ← 测试图是纯红, 答得不对, 疑似没真看图"))
             except Exception as ex:                      # noqa: BLE001
-                print(f"      ✗ **不接受图像输入**: {str(ex)[:90]}")
-                print("      ↑ 这一路只能做纯文本, 描述题需要看图, 不能用它")
+                print(f"      ✗ **不接受图像输入**: {http_detail(ex)}")
+                print("      ↑ 先看上面的报错体再下结论:")
+                print("        · 报 500 且提到 pixel/patch/resize → 图尺寸问题")
+                print("        · 报 400 且提到 multimodal/limit_mm → 服务端起的时候"
+                      "没给 --limit-mm-per-prompt image=1")
+                print("        · 报 400 且说不认识 image_url → 这一路确实是纯文本模型")
+                print("        · 其他 500 → 去看 vLLM 那边的 traceback")
 
 
 def cmd_generate(args, onto):
