@@ -233,7 +233,10 @@ def load_endpoints(path: str | None, role: str, model: str,
         # endpoints: 底下分组(configs/generate.yaml), 或直接放在顶层(老格式)
         src = cfg.get("endpoints") if isinstance(cfg.get("endpoints"), dict) else cfg
         group = src.get(role)
-        if group is None:
+        # `review: []` 写的是空列表不是缺省, 判 `is None` 落不进回退, 于是
+        # 一路掉到最后那句 SystemExit —— 明明 generate 三路都好好的。
+        # 非 generate 角色只要是空的(缺省 / [] / null)就一律退回 generate。
+        if not group and role != "generate":
             group = src.get("generate") or []
         llm_cfg = cfg.get("llm") or {}
         global MAX_IMAGE_SIDE, IMAGE_QUALITY
@@ -711,21 +714,25 @@ def cmd_ping(args, onto):
 
     probe_png = base64.b64encode(_solid_png(504, 504, (214, 40, 40))).decode()
 
+    # **先看配置再连服务**。反过来的话, review 留空时 load_endpoints 会先抛
+    # SystemExit, "未配置 → 跳过"那段永远轮不到执行, generate 三路明明全绿
+    # 也照样以一句"没有可用的推理端点"收场。
+    raw_by_role: dict[str, list] = {}
+    if args.endpoints:
+        _cfg = yaml.safe_load(Path(args.endpoints).read_text(encoding="utf-8")) or {}
+        _src = (_cfg.get("endpoints")
+                if isinstance(_cfg.get("endpoints"), dict) else _cfg)
+        raw_by_role = {r: (_src.get(r) or []) for r in ("generate", "review", "screen")}
+
     for role in ("generate", "review", "screen"):
-        pool = load_endpoints(args.endpoints, role, args.model, args.base_url)
         if role != "generate" and not args.endpoints:
             break
-        cfg_group = {}
-        if args.endpoints:
-            cfg_group = yaml.safe_load(Path(args.endpoints).read_text(encoding="utf-8")) or {}
-            _src = (cfg_group.get("endpoints")
-                    if isinstance(cfg_group.get("endpoints"), dict) else cfg_group)
-            raw = _src.get(role) or []
-            if not raw and role != "generate":
-                print(f"\n[{role}] 未配置" +
-                      ("  ← 审稿没有独立模型, 会退回 generate 池, 六维 review 形同虚设"
-                       if role == "review" else ""))
-                continue
+        if role != "generate" and not raw_by_role.get(role):
+            print(f"\n[{role}] 未配置" +
+                  ("  ← 审稿没有独立模型, 会退回 generate 池, 六维 review 形同虚设"
+                   if role == "review" else "  ← 会复用 generate 池"))
+            continue
+        pool = load_endpoints(args.endpoints, role, args.model, args.base_url)
         print(f"\n[{role}] {len(pool)} 路")
         for e in pool:
             tag = f"  {e.name:14s} {e.chat_url}"
