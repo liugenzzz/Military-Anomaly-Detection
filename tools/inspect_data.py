@@ -172,6 +172,14 @@ def main() -> None:
                if args.endpoints else {})
         args.inline_images = bool((cfg.get("llm") or {}).get("inline_images", True))
     print(f"  图像传法: {'base64 内联' if args.inline_images else 'file:// 由推理机读盘'}")
+    if args.inline_images:
+        import llm_qa
+        try:
+            import PIL  # noqa: F401
+        except ImportError:
+            if llm_qa.MAX_IMAGE_SIDE:
+                print(f"  ⚠ 没装 Pillow, max_image_side={llm_qa.MAX_IMAGE_SIDE} 不生效, "
+                      f"内联的是原图。\n    3072x2048 那批会明显变慢: pip install Pillow")
 
     def run(s: Scene):
         msg = [{"role": "user",
@@ -190,6 +198,16 @@ def main() -> None:
     # 吞成 "[调用失败]" 写进结果, 于是跑完才发现整份报告 100% 是错误信息 ——
     # 既浪费了一轮, 又让一次全废的运行看起来像"有结果了"。
     probe = run(picked[0])
+    # 服务端读不了本地路径时自动切回内联。配置里把 inline_images 写成 false 很容易,
+    # 而这个错只在真正发图的时候才暴露 —— 与其让人去翻配置, 不如就地改对再往下跑。
+    if (not args.inline_images
+            and "allowed-local-media-path" in probe["model_sees"]):
+        print("\n  推理机读不了本地路径(vLLM 没带 --allowed-local-media-path), "
+              "自动改用 base64 内联重试。")
+        print("  想省这份带宽的话, 起服务时加上该参数并确认推理机挂了同一块盘;"
+              "\n  否则把 configs/generate.yaml 的 llm.inline_images 设成 true。")
+        args.inline_images = True
+        probe = run(picked[0])
     if probe["model_sees"].startswith("[调用失败]"):
         print(f"\n预检失败, 已中止 —— 不再把 {len(picked)} 条错误信息写成报告。")
         print(f"  图: {picked[0].image_path}")

@@ -50,7 +50,12 @@ llm:
   max_tokens: 4096
   workers: 0                  # 0 = 跟随端点池总并发，不用手算
   cache_dir: ".llm_cache"     # 按请求哈希缓存，重跑不重复计费
-  inline_images: false        # 远端 API 要 base64 内联；本地服务挂同一块盘就不用
+  # true = 图片转 base64 塞进请求体；false = 只发 file:// 路径，让推理机自己读盘。
+  # **默认 true。** false 看着省带宽，但它要求 vLLM 起服务时带
+  # --allowed-local-media-path 且推理机挂了同一块盘，两个条件缺一个就每张都报
+  # 「Cannot load local files without `--allowed-local-media-path`」。
+  # 配合下面的 max_image_side，内联前会先把长边缩到 1280，实际传的字节并不多。
+  inline_images: true
   max_image_side: 1280        # 内联前把长边缩到这个数（0=不缩，需要 Pillow）。
                               # Qwen-VL 服务端本来就按 max_pixels=1280*28*28 缩回去，
                               # DOTA 那种 4000x4000 原图传全尺寸只是白费带宽。

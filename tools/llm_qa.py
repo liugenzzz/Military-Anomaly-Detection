@@ -1091,6 +1091,23 @@ def _run_and_write(reqs, fn, out: str, workers: int) -> None:
         print(f"  [警告] 失败率 {n_err / len(reqs):.0%}, 先查服务再往下走")
 
 
+def resolve_inline(args) -> bool:
+    """命令行没指定就读配置的 llm.inline_images, 再没有就内联。
+
+    单独抽出来是因为 generate / verify / screen 三个子命令都要用同一套口径,
+    以前各写各的默认值, 结果 ping 通了 generate 照样全挂。
+    """
+    if getattr(args, "inline_images", None) is not None:
+        return bool(args.inline_images)
+    path = getattr(args, "endpoints", None)
+    if not path and Path("configs/generate.yaml").exists():
+        path = "configs/generate.yaml"
+    if path and Path(path).exists():
+        cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        return bool((cfg.get("llm") or {}).get("inline_images", True))
+    return True
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="LLM 驱动的指令型 VQA 生成")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1109,7 +1126,14 @@ def main() -> None:
         p.add_argument("--cache-dir", default=".llm_cache", help="按请求哈希缓存, 重跑不重复计费")
         p.add_argument("--workers", type=int, default=8,
                        help="并发数。填 0 = 跟着端点池的总并发走")
-        p.add_argument("--inline-images", action="store_true", help="图像转 base64 内联(远端 API 需要)")
+        # 不指定就读配置的 llm.inline_images(默认 true)。**别把默认设成 false** ——
+        # 那要求 vLLM 起服务时带 --allowed-local-media-path 且推理机挂了同一块盘,
+        # 条件不满足时每一张图都报 "Cannot load local files without ..."。
+        p.add_argument("--inline-images", dest="inline_images",
+                       action="store_true", default=None,
+                       help="图像转 base64 内联(默认, 也是唯一不依赖推理机挂盘的传法)")
+        p.add_argument("--no-inline-images", dest="inline_images", action="store_false",
+                       help="改发 file:// 让推理机自己读盘(需 --allowed-local-media-path)")
         p.add_argument("--dry-run", action="store_true", help="只写请求, 不调用 API")
         p.add_argument("--exclude-ids", default=None,
                        help="golden set 的 image_id 清单, 必须排除否则泄漏(make_golden.py 产出)")
@@ -1122,7 +1146,7 @@ def main() -> None:
     p.add_argument("--endpoints", default=None,
                    help="端点池 yaml。不填就读 configs/generate.yaml")
     p.set_defaults(out="/dev/null", cache_dir=None, workers=1,
-                   inline_images=False, dry_run=False, exclude_ids=None)
+                   inline_images=True, dry_run=False, exclude_ids=None)
 
     p = sub.add_parser("screen", help="闸5 图像质检")
     p.add_argument("--scenes", required=True); common(p)
@@ -1154,6 +1178,7 @@ def main() -> None:
     common(p)
 
     args = ap.parse_args()
+    args.inline_images = resolve_inline(args)
     onto = yaml.safe_load(Path(args.ontology).read_text(encoding="utf-8"))
     globals()["BOX_SCALE"] = int(onto.get("box_scale", BOX_SCALE))
     {"ping": cmd_ping, "screen": cmd_screen,
