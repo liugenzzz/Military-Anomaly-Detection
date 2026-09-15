@@ -189,15 +189,18 @@ def region_box_of(s: Scene, zh: dict[str, str]) -> tuple[list[float], str] | Non
     规则侧和 LLM 侧共用这一份 —— 带框描述那类题里, **文字由模型写, 坐标由这里算**,
     两边必须是同一个框, 否则同一张图的坐标题和描述题会给出不一样的框。
     """
+    # 本体里查不到中文名时**退到通用中文词, 绝不落英文 id**。
+    # `"label":"crowd_gathering区域"` 这种一旦进了训练集, 模型就会学着往
+    # 中文答案里吐英文标识符, 而且抽检时很容易被当成正常内容滑过去。
     ev = next((e for e in s.events if "cluster_bbox" in e.evidence), None)
     if ev:
-        return ev.evidence["cluster_bbox"], f"{zh.get(ev.type, ev.type)}区域"
+        return ev.evidence["cluster_bbox"], f"{zh.get(ev.type) or '异常'}区域"
     for e in s.events:
         if e.evidence.get("boxes"):
             bs = e.evidence["boxes"]
             xs = [b[0] for b in bs] + [b[2] for b in bs]
             ys = [b[1] for b in bs] + [b[3] for b in bs]
-            return [min(xs), min(ys), max(xs), max(ys)], zh.get(e.type, e.type)
+            return [min(xs), min(ys), max(xs), max(ys)], zh.get(e.type) or "异常目标"
     cands = [o for o in s.objects if o.cls in ("fire", "smoke")]
     if cands:
         o = max(cands, key=lambda x: x.area)
@@ -231,6 +234,9 @@ class RuleBuilder:
         self.system = self.systems[0]
         self.rng = random.Random(seed)
         self._n = 0
+        # 本体里查不到中文名的类别。跑完在报告里点出来 —— 这类问题静默降级的
+        # 代价是整批数据里混进「为异常」和英文 id, 肉眼抽检很难发现。
+        self.unknown_types: set[str] = set()
 
     # -------------------------------------------------- 小工具
     def _ask(self, task: str, **kw) -> str:
@@ -239,8 +245,22 @@ class RuleBuilder:
             q = q.replace("{" + k + "}", str(v))
         return q
 
-    def _anomaly_zh(self, s: Scene) -> str:
-        return "、".join(self.zh[t] for t in s.anomaly_types if t in self.zh) or "异常"
+    def _anomaly_zh(self, s: Scene, default: str = "异常") -> str:
+        """异常类别的中文名。**本体里没有的类别要记账, 不能悄悄糊过去。**
+
+        原来这里无条件 `or "异常"`, 于是 ontology.yaml 里没登记的类别(比如 demo
+        数据的 crowd_gathering)会生成「存在异常，为异常。」—— 一句什么都没说的
+        废话, 却照样落盘进训练数据。同一个根因在 region_box_of 那边表现为
+        `"label":"crowd_gathering区域"`, 直接把英文本体 id 训给了模型。
+
+        现在: 解析不出来的类别进 unknown_types, 跑完统一告警; 判定句那边传
+        default="" 让它换一套不点名的措辞, 而不是硬凑一个"为异常"。
+        """
+        names = [self.zh[t] for t in s.anomaly_types if t in self.zh]
+        miss = [t for t in s.anomaly_types if t not in self.zh]
+        if miss:
+            self.unknown_types.update(miss)
+        return "、".join(names) or default
 
     def _cluster(self, s: Scene):
         return next((e for e in s.events if "cluster_bbox" in e.evidence), None)
@@ -321,13 +341,19 @@ class RuleBuilder:
             else:
                 lead = self.rng.choice(["存在异常，为", "画面中出现异常：", "判定为",
                                         "有异常。类型为"])
+            zh_name = self._anomaly_zh(s, default="")
+            if not zh_name:
+                # 叫不出名字就别硬点名。「存在异常，为异常。」这种句子训不出东西,
+                # 只会教模型用同义反复搪塞。
+                lead, zh_name = self.rng.choice(
+                    ["存在异常", "画面中出现异常", "判定为异常"]), ""
             tail = self._judge_detail(s, cls_hint)
             if s.events and all(e.evidence.get("relaxed") for e in s.events):
                 need = self.rng.choice(["规模有限，建议继续观察确认。", "尚未达到典型规模，建议复核。",
                                         "证据强度一般，建议结合后续画面判断。"])
             else:
                 need = self.rng.choice(["", "建议上报并持续观察。", "建议持续观察。", ""])
-            a = f"{lead}{self._anomaly_zh(s)}。{tail}{need}"
+            a = f"{lead}{zh_name}。{tail}{need}"
         elif s.meta.get("hard_negative"):
             by: dict[str, int] = {}
             for o in s.objects:
@@ -1027,6 +1053,11 @@ def main() -> None:
     print("  任务:", dict(tasks.most_common()))
     print("  轮数:", {f"{k}轮": v for k, v in sorted(turns.items())})
     print("  形态:", dict(mods))
+    if builder.unknown_types:
+        print(f"\n⚠ 本体里查不到中文名的类别: {sorted(builder.unknown_types)}")
+        print("  这些场景的判定句会退成不点名的说法、框的 label 退成通用词 ——")
+        print("  能跑, 但训不出这几类的名字。要么在 configs/ontology.yaml 里补上,")
+        print("  要么确认这些 scene 本来就不该进这一批。")
 
 
 if __name__ == "__main__":
