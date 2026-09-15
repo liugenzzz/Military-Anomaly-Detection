@@ -59,7 +59,7 @@
 | 异常聚集 | `massing` | ✅ 启用 | DroneCrowd / MAR20 / VisDrone / Mendeley / ERA |
 | 爆炸火光 | `explosion` | ✅ 启用 | FASDD_UAV / ERA |
 | 烟雾 | `smoke` | ✅ 启用 | FASDD_UAV |
-| 车队机动 | `convoy` | ✅ 启用 | v0.5.2 起放开 `require_any`，民用车队也计入 |
+| 车队机动 | `convoy` | ✅ 启用 | v0.5.3 改搜共线子集。**注定低产**，见下 |
 | ~~越界移动~~ | `border_crossing` | ❌ 停用 | 单帧既看不到运动也看不到虚拟线，这类会教模型编造 |
 | ~~灾害现场~~ | `disaster` | ❌ 停用 | 规则成立，但没有数据源（2026-09 决定不再补数据集） |
 
@@ -126,7 +126,12 @@ ERA / ERA-SF        2173×2   同一批素材的两种形态，**排配额时不
 
 1. **自由看图（`vlm_free_look.md`）还没成功产出过。** 它决定后面的问法设计。
 2. 集结 ~8000 / 爆炸 ~8100 / 烟雾 ~12900，**都够不到 25000/类的目标**。
-   convoy 放开后产量待测。
+3. **convoy 注定低产（几十到几百量级），这是几何上的硬限制，不是调参问题。**
+   实测量过：40 辆随机散车能凑出比真车队还整齐的"队列"（CV 0.077 vs 0.156）；
+   80 辆以上时随机线的间距能压到 0.8 车长，比任何真车队都紧。停车场的一排车
+   本身就是共线 + 等距 + 细长。所以单帧几何量**分不开**车队和密集车流。
+   现在靠"覆盖率 ≥60%"（画面里的车基本都编进队列）保精度，代价是城市车流里的
+   车队一律抓不到。要提产量只能换路子：多帧看运动，或换含车队的数据源。
 
 已解决：
 - ~~convoy 产量≈0~~ → v0.5.2 放开 `require_any`（2026-09 用户决定）。
@@ -187,8 +192,9 @@ python tools/export_media.py --vqa-dir data/vqa --media-root /mnt/.../corpus_med
 **改完代码跑这两个**（十几秒）：
 
 ```bash
-python tests/qc_fixture.py      # QC 的 10 类检查各命中一次，反例零告警
-python tests/merge_fixture.py   # 合并器对 4 种事故处理正确
+python tests/qc_fixture.py       # QC 的 10 类检查各命中一次，反例零告警
+python tests/merge_fixture.py    # 合并器对 4 种事故处理正确
+python tests/convoy_fixture.py   # 车队判定的 8 个对照场景
 python -m pyflakes tools/ tests/
 ```
 
@@ -230,6 +236,13 @@ python -m pyflakes tools/ tests/
 | 把视频当图发 | ERA 的 `.mp4` 被标成 `image/jpeg` base64 → HTTP 400 超 max_model_len |
 | 画框外的人头点 | 硬裁后 `x2 < x1`，46.7 万个里混进一个退化框 |
 | 关键词子串匹配 | `vd_mot_testdev` 里含 `test` → 整个数据划分被当演示数据跳掉 |
+
+### 算法上的硬限制（不是 bug，别再试图调参解决）
+
+- **单帧几何分不出车队和密集车流。** 见上「未决问题 3」。`border_crossing` 当初
+  被停用是同一个道理：单帧看不到运动。遇到这类，先量分布再决定，别硬调阈值。
+- **收紧"整齐度"类阈值往往适得其反。** 随机点凑出的线比真实物体还规整 ——
+  真实世界有抖动，随机采样没有。
 
 ### 我自己犯的错
 

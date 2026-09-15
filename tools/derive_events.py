@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import random
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -221,29 +222,181 @@ def derive_linear_formation(scene: Scene, rule: dict[str, Any], cls_id: str,
     和装备集结同一个套路, 那个已经验证有效。
     """
     targets = {c.lower() for c in rule["target_classes"]}
-    objs = scene.of_classes(targets)
-    if len(objs) < rule["min_count"]:
+    all_objs = scene.of_classes(targets)
+    if len(all_objs) < rule["min_count"]:
         # 一个都没有 ≠ 有但不够。前者说明这个数据源压根不含这类标注(比如
         # DroneCrowd 只有人头点, 没有车), 属于"本来就轮不到这条规则", 不是被否决;
         # 混在一起报会把真正该看的信号淹掉。
-        return _veto(cls_id, "数据源无此类目标" if not objs
-                     else f"目标数不足({len(objs)}<{rule['min_count']})")
-    centers = [o.center for o in objs]
+        return _veto(cls_id, "数据源无此类目标" if not all_objs
+                     else f"目标数不足({len(all_objs)}<{rule['min_count']})")
 
+    # **找共线的子集, 不是要求全图共线。** 这是这条规则最早的致命缺陷:
+    # 原来对画面里所有车一起算 R², 于是一支七辆车的车队旁边只要有十辆散车,
+    # 整体 R² 就掉下去, 车队被判"不共线"。真实航拍图里车队周围永远有别的车,
+    # 所以全库跑下来 convoy 只有 49 条, 而"不共线"的否决多达 13983 —— 那不是
+    # 没有车队, 是规则看不见它们。一图两支车队同理会互相拉低 R²。
+    out: list[Event] = []
+    covered: set[int] = set()
+    remaining = list(all_objs)
+    for _ in range(int(rule.get("max_lines", 3))):
+        if len(remaining) < rule["min_count"]:
+            break
+        found = None
+        for cand in _line_candidates(remaining, rule):
+            # 一条线上可能混着车队和散车。**取其中间距均匀的最长一段**, 而不是
+            # 整条线一起判 —— 否则线上多蹭进两辆散车就把整支车队否掉了。
+            run = _even_run(cand, rule)
+            if run is None:
+                continue
+            ev = _check_column(scene, run, rule, cls_id)
+            if ev is not None:
+                found = (run, ev)
+                break
+        if found is None:
+            break
+        run, ev = found
+        out.append(ev)
+        # **只摘掉判定通过的那些目标。** 早先是不管过没过都从 remaining 里删掉,
+        # 于是一条蹭出来的假线会把真车队的成员一起吃掉。
+        ids = {id(o) for o in run}
+        covered |= ids
+        remaining = [o for o in remaining if id(o) not in ids]
+
+    if not out:
+        return _veto(cls_id, "不共线")
+
+    # **最后一道闸: 画面里的车必须基本都编进了队列。**
+    # 实测过: 15 辆随机散车就能凑出一条间距 1.49 车长的线, 而最紧的真车队九成
+    # 分位才 1.63; 80 辆以上时随机线能压到 0.8 车长, 比任何真车队都紧。也就是说
+    # 靠共线度/间距/整齐度这些几何量**分不开**车队和密集车流 —— 停车场的一排车
+    # 本身就是共线 + 等距 + 细长。
+    # 唯一还站得住的信号是覆盖率: 一支车队开在空旷路段上, 画面里的车就是它;
+    # 而从满图散车里凑出来的线永远只占一小撮。
+    # 按**所有队列的并集**算, 不是单条 —— 一图两支车队(此外无车)应当算数。
+    # 代价说清楚: 城市密集车流里的车队一律抓不到。这是有意的取舍, 那种场景本来
+    # 就分不出车队和车流, 硬判只会制造假数据, 与"不要为了凑数据破坏精度"冲突。
+    ratio = len(covered) / max(1, len(all_objs))
+    if ratio < float(rule.get("min_inlier_ratio", 0.6)):
+        # 记账按档分桶。早先把百分比直接写进原因, 于是每个百分比占一行,
+        # 一份报告里冒出十几行同一类否决, 反而看不出重点。
+        b = "不足两成" if ratio < 0.2 else "两到四成" if ratio < 0.4 else "四到六成"
+        _veto(cls_id, f"成队的车只占同类目标的{b}(周围散车太多, 分不出车队)")
+        return []
+    return out
+
+
+def _even_run(objs: list[Obj], rule: dict[str, Any]) -> list[Obj] | None:
+    """一条线上间距最均匀的最长连续一段。
+
+    车队的定义就是"沿线首尾相接、间距大致相等的一串"。线上蹭进来的散车会让
+    整体间距变异系数爆掉, 但把它们排除后中间那一段仍然是车队 —— 所以这里按
+    投影排序后滑窗, 找最长的、间距 CV 达标的连续段。
+    """
+    if len(objs) < rule["min_count"]:
+        return None
+    proj, _ = _axis_project([o.center for o in objs])
+    order = sorted(range(len(objs)), key=lambda k: proj[k])
+    ps = [proj[k] for k in order]
+    thr = float(rule.get("max_spacing_cv", 0.45))
+    best: tuple[int, int] = (0, 0)
+    for i in range(len(ps)):
+        for j in range(i + int(rule["min_count"]), len(ps) + 1):
+            gaps = [b - a for a, b in zip(ps[i:j], ps[i + 1:j])]
+            m = sum(gaps) / len(gaps)
+            if m <= 1e-6:
+                continue
+            cv = (sum((g - m) ** 2 for g in gaps) / len(gaps)) ** 0.5 / m
+            if cv <= thr and (j - i) > (best[1] - best[0]):
+                best = (i, j)
+    if best[1] - best[0] < rule["min_count"]:
+        return None
+    return [objs[order[k]] for k in range(best[0], best[1])]
+
+
+def _line_candidates(objs: list[Obj], rule: dict[str, Any]) -> list[list[Obj]]:
+    """RANSAC: 按内点数从多到少给出若干条候选线。
+
+    **不能只返回内点最多的那一条。** 三十辆散车里总能拉出一条蹭到十辆的线,
+    它的内点比七辆车的真车队还多; 只看最多的那条, 真车队永远轮不上。
+    所以给出前 K 条候选, 由调用方逐条跑完整判据, 谁先通过用谁。
+
+    带宽取目标尺寸的若干倍 —— 车队沿路行进时中心点不会正好共线, 但偏离不会
+    超过一两个车身宽。按画幅比例取带宽会随裁剪尺寸漂移, 和 cluster_eps 同一个道理。
+    随机数固定种子, 保证重跑结果一致。
+    """
+    n = len(objs)
+    if n < rule["min_count"]:
+        return []
+    cs = [o.center for o in objs]
+    sizes = sorted(max(o.bbox[2] - o.bbox[0], o.bbox[3] - o.bbox[1]) for o in objs)
+    band = sizes[len(sizes) // 2] * float(rule.get("band_obj_mult", 1.5))
+
+    pairs: list[tuple[int, int]] = []
+    budget = int(rule.get("ransac_pairs", 3000))
+    if n * (n - 1) // 2 <= budget:
+        pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+    else:
+        rng = random.Random(0)                 # 固定种子: 同一份数据重跑结果一致
+        seen = set()
+        while len(pairs) < budget:
+            i, j = rng.randrange(n), rng.randrange(n)
+            if i != j and (key := (min(i, j), max(i, j))) not in seen:
+                seen.add(key)
+                pairs.append(key)
+
+    seen_sets: set[tuple[int, ...]] = set()
+    cands: list[list[int]] = []
+    for i, j in pairs:
+        x1, y1 = cs[i]
+        x2, y2 = cs[j]
+        dx, dy = x2 - x1, y2 - y1
+        L = math.hypot(dx, dy)
+        if L < 1e-6:
+            continue
+        ux, uy = dx / L, dy / L
+        inl = tuple(k for k, (x, y) in enumerate(cs)
+                    if abs(-(x - x1) * uy + (y - y1) * ux) <= band)
+        if len(inl) >= rule["min_count"] and inl not in seen_sets:
+            seen_sets.add(inl)
+            cands.append(list(inl))
+    cands.sort(key=len, reverse=True)
+    return [[objs[k] for k in c] for c in cands[: int(rule.get("max_candidates", 40))]]
+
+
+def _check_column(scene: Scene, objs: list[Obj], rule: dict[str, Any],
+                  cls_id: str) -> "Event | None":
+    """对一条候选车列跑完整判据。不合格返回 None 并记账。"""
+    centers = [o.center for o in objs]
     r2 = _r_squared(centers)
     if r2 < rule["collinearity_r2"]:
-        return _veto(cls_id, "不共线")
+        _veto(cls_id, "不共线")
+        return None
 
     proj, axis = _axis_project(centers)
     gaps = [b - a for a, b in zip(proj, proj[1:])]
     if not gaps:
-        return []
+        return None
     mean_gap = sum(gaps) / len(gaps)
     if mean_gap <= 1e-6:
-        return []
+        return None
     cv = (sum((g - mean_gap) ** 2 for g in gaps) / len(gaps)) ** 0.5 / mean_gap
     if cv > rule.get("max_spacing_cv", 0.45):
-        return _veto(cls_id, "间距不均(是车流不是车队)")
+        _veto(cls_id, "间距不均(是车流不是车队)")
+        return None
+
+    # **车队是"挨着走的一串", 这一条才是真正分得开的判据。**
+    # 实测过: 拿 40 辆随机散车去凑最整齐的一条线, 它的间距变异系数能低到 0.077,
+    # 比带抖动的真车队(中位 0.156)还"整齐" —— 所以收紧 CV 只会误杀真车队,
+    # 分不开假的。真正拉开差距的是**平均间距相对车身**:
+    #     真车队   中位 3.8 车长, 最大 4.0
+    #     随机凑线 最小 5.8 车长, 中位 9.3
+    # 物理上也说得通: 保持队形就得跟得紧, 而散布在全画幅的车沿任一条线都拉得很开。
+    sizes = sorted(max(o.bbox[2] - o.bbox[0], o.bbox[3] - o.bbox[1]) for o in objs)
+    car = sizes[len(sizes) // 2] or 1.0
+    gap_mult = mean_gap / car
+    if gap_mult > float(rule.get("max_gap_obj_mult", 5.0)):
+        _veto(cls_id, f"间距过大({gap_mult:.1f}倍车身, 是散布不是车队)")
+        return None
 
     # 细长度: 沿主轴的跨度 / 垂直方向的跨度
     ux, uy = axis
@@ -252,14 +405,16 @@ def derive_linear_formation(scene: Scene, rule: dict[str, Any], cls_id: str,
     span_perp = max(perp) - min(perp)
     elong = span_long / max(1.0, span_perp)
     if elong < rule.get("min_elongation", 4.0):
-        return _veto(cls_id, "不够细长(是一片, 归集结)")
+        _veto(cls_id, "不够细长(是一片, 归集结)")
+        return None
 
     by_cls: dict[str, int] = {}
     for o in objs:
         by_cls[o.cls.lower()] = by_cls.get(o.cls.lower(), 0) + 1
     main_cls, main_n = max(by_cls.items(), key=lambda kv: kv[1])
     if main_n / len(objs) < rule.get("min_same_class_ratio", 0.7):
-        return _veto(cls_id, "车型杂(是车流不是车队)")
+        _veto(cls_id, "车型杂(是车流不是车队)")
+        return None
 
     require = {c.lower() for c in rule.get("require_any", [])}
     if require and not (set(by_cls) & require):
@@ -271,7 +426,8 @@ def derive_linear_formation(scene: Scene, rule: dict[str, Any], cls_id: str,
             ys = [c[1] for c in centers]
             scene.meta.setdefault("hard_negative_bbox",
                                   [min(xs), min(ys), max(xs), max(ys)])
-        return _veto(cls_id, "不含军事目标(require_any)")
+        _veto(cls_id, "不含军事目标(require_any)")
+        return None
 
     xs = [c[0] for c in centers]
     ys = [c[1] for c in centers]
@@ -279,18 +435,19 @@ def derive_linear_formation(scene: Scene, rule: dict[str, Any], cls_id: str,
     # 「装甲车队」和「卡车车队」, 配额也要靠它保证两种都有。
     mil = {c.lower() for c in rule.get("military_classes", [])}
     n_mil = sum(1 for o in objs if o.cls.lower() in mil)
-    return [Event(
+    return Event(
         type=cls_id,
         conf=round(min(1.0, r2 * (1.0 - cv)), 3),
         evidence={"rule": "linear_formation", "count": len(objs), "r2": round(r2, 4),
                   "spacing_cv": round(cv, 3), "elongation": round(elong, 2),
+                  "gap_per_object": round(gap_mult, 2),
                   "main_class": main_cls,
                   "military_grade": ("military" if n_mil >= max(1, len(objs) // 2)
                                      else "mixed" if n_mil else "civil"),
                   "n_military": n_mil,
                   "cluster_bbox": [min(xs), min(ys), max(xs), max(ys)],
                   "object_ids": [o.id for o in objs]},
-    )]
+    )
 
 
 # ---------------------------------------------------------------- 越界
@@ -420,6 +577,23 @@ def resolve_overlap(scene: Scene) -> None:
 
 def derive(scenes: list[Scene], ontology: dict[str, Any], overwrite: bool = False) -> list[Scene]:
     rules = collect_rules(ontology)
+    # **本体的 enabled 要在这里统一执行, 不能只在 collect_rules 里管。**
+    # collect_rules 只管本文件自己算的那几条规则; 而适配器在 prepare 阶段会
+    # 直接把事件挂在 scene 上(era.py 的 ANOMALY 映射就是), 完全绕过本体。
+    # 于是 disaster 明明 enabled: false, 全库照样出了 528 条事件, 一路会走到
+    # build_vqa 生成灾害题 —— 而灾害这一类已经决定不做了。
+    enabled = {c["id"] for c in ontology["classes"] if c.get("enabled", True)}
+    dropped: Counter = Counter()
+    for scene in scenes:
+        kept = [e for e in scene.events if e.type in enabled]
+        if len(kept) != len(scene.events):
+            dropped.update(e.type for e in scene.events if e.type not in enabled)
+            scene.events = kept
+    if dropped:
+        print(f"按本体的 enabled 丢弃了 {sum(dropped.values())} 条停用类别的事件: "
+              f"{dict(dropped.most_common())}")
+        print("  (这些是适配器在 prepare 阶段直接挂上的, 不经过本文件的规则;"
+              "\n   要保留就把 configs/ontology.yaml 里对应类的 enabled 改回 true)")
     for scene in scenes:
         if overwrite:
             # **只清本文件能重算的那几种事件**。原来的写法是"丢掉所有带 rule 字段的",
