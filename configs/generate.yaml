@@ -1,0 +1,117 @@
+endpoints:
+  generate:
+  - name: 27-1
+    url: http://10.107.226.27:8001/v1
+    model: Qwen3.8-27B
+    key: local-pool-key
+    concurrency: 4
+  - name: 27-2
+    url: http://10.107.226.27:8002/v1
+    model: Qwen3.8-27B
+    key: local-pool-key
+    concurrency: 4
+  - name: 27-3
+    url: http://10.107.226.27:8003/v1
+    model: Qwen3.8-27B
+    key: local-pool-key
+    concurrency: 4
+  review: []
+llm:
+  temperature: 0.55
+  temperature_review: 0.0
+  max_retries: 3
+  timeout: 180
+  workers: 0
+  cache_dir: .llm_cache
+  inline_images: false
+coordinate:
+  mode: relative_1000
+  scale: 1000
+  smart_resize:
+    factor: 28
+    min_pixels: 200704
+    max_pixels: 1003520
+quota:
+  target_per_class: 25000
+  desc_share: 0.6
+  negative_ratio: 0.3
+  balance_warn_ratio: 3.0
+tasks:
+  locate_verbal: 0.7
+  negation: 0.2
+  two_turn: 0.3
+  three_turn: 0.35
+  count_box: 0.25
+  count_then_judge: 0.55
+  compose: 0.3
+  compare: 0.25
+  correct: 0.3
+  temporal: 0.6
+  dense_region: 0.55
+  unanswerable: 0.1
+  chain: 0.3
+counting:
+  exact_max: 15
+  few: 6
+  min_area_for_exact: 0.0008
+  area_floor: 0.0002
+area_buckets:
+- max: 0.05
+  text: 约占画幅不到半成
+- max: 0.15
+  text: 约占画幅一成上下
+- max: 0.3
+  text: 约占画幅两三成
+- max: 0.6
+  text: 约占画幅一半上下
+- max: 1.01
+  text: 覆盖画面大部分区域
+facets:
+  max_per_image: 8
+  skip:
+  - position
+  weights:
+    evidence: 25
+    grounded: 30
+    full: 8
+    hard_neg: 40
+    scan: 30
+    formation: 18
+    composition: 18
+    scale: 15
+    site: 12
+    intensity: 18
+    debris: 18
+    extent: 15
+    stage: 12
+    morphology: 18
+    color: 18
+    drift: 15
+    occlusion: 12
+    formation_line: 18
+    vehicle_mix: 18
+    route: 15
+    column_scale: 12
+    extent_damage: 18
+    terrain_change: 18
+    affected_objects: 15
+    access: 12
+review:
+  ratio: 0.3
+  min_score: 4
+  dims:
+  - correct
+  - grounded
+  - facet
+  - instruction
+  - needs_image
+  - no_overclaim
+  batch_per_image: 8
+output:
+  image_folder: ""            # 留空则写绝对路径; 填了就写相对路径并进 dataset_info 的 media_dir
+  relative_paths: true
+  split:
+  - 0.8
+  - 0.1
+  - 0.1
+  seed: 0

@@ -156,7 +156,15 @@ def main() -> None:
             (out / fn).write_text(json.dumps(part, ensure_ascii=False, indent=1),
                                   encoding="utf-8")
             key = f"{args.name}{'_video' if suffix else ''}" + ("" if sp == "train" else f"_{sp}")
-            info[key] = {"file_name": fn, "formatting": "sharegpt",
+            entry_extra = {}
+            try:
+                from config import CFG
+                folder = CFG.get("output", "image_folder", default="")
+                if folder:
+                    entry_extra["media_dir"] = folder
+            except Exception:                  # noqa: BLE001
+                pass
+            info[key] = {"file_name": fn, "formatting": "sharegpt", **entry_extra,
                          "columns": {"messages": "conversations", field: field,
                                      "system": "system"},
                          "tags": tags}

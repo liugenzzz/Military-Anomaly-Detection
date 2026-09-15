@@ -23,8 +23,21 @@ import struct
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-BBOX_SCALE = 1000
-COORD_MODE = "qwen_relative_1000"          # 写进 extra，下游不必猜
+def _cfg():
+    try:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from config import CFG
+        return CFG
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
+_C = _cfg()
+BBOX_SCALE = _C.coord_scale if _C else 1000
+# 写进 metadata, 下游不必猜。**跟着配置走** —— 写死成 qwen_relative_1000 而实际
+# 换了制式的话, 这个字段就成了假证据, 比没有更糟。
+COORD_MODE = (_C.coord_mode if _C else "relative_1000")
 
 
 def clamp(v: float, lo: float, hi: float) -> float:
@@ -56,15 +69,38 @@ def xywh_to_xyxy(box: Sequence[float]) -> list[float]:
 
 
 def to_bbox2d(pixel_xyxy: Sequence[float], img_w: int, img_h: int,
-              scale: int = BBOX_SCALE) -> list[int]:
-    """像素 [x1,y1,x2,y2] -> 0~scale 整数。"""
+              scale: int = BBOX_SCALE, mode: str | None = None) -> list[int]:
+    """源图像素 [x1,y1,x2,y2] -> 落盘坐标。
+
+    **制式必须和底座模型对上, 否则整批框都是废的**:
+      relative_1000   归一化到 [0,scale]。Qwen2-VL / Qwen3-VL 的约定。
+      absolute_pixel  smart_resize 之后的绝对像素。Qwen2.5-VL 改用了这个 ——
+                      拿 0-1000 的框去训它, 等于把所有目标都标到左上角一小块里。
+      absolute_source 原图绝对像素。自己写推理后处理时才用。
+    mode 不传就读 configs/generate.yaml 的 coordinate.mode。
+    """
     if img_w <= 0 or img_h <= 0:
         raise ValueError(f"图片尺寸必须为正，得到 {img_w}x{img_h}")
-    x1, y1, x2, y2 = pixel_xyxy
-    return [int(round(clamp(x1, 0, img_w) / img_w * scale)),
-            int(round(clamp(y1, 0, img_h) / img_h * scale)),
-            int(round(clamp(x2, 0, img_w) / img_w * scale)),
-            int(round(clamp(y2, 0, img_h) / img_h * scale))]
+    if mode is None:
+        try:
+            import sys
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+            from config import CFG
+            mode, scale = CFG.coord_mode, CFG.coord_scale
+        except Exception:                                  # noqa: BLE001
+            mode = "relative_1000"
+
+    x1, y1, x2, y2 = (clamp(pixel_xyxy[0], 0, img_w), clamp(pixel_xyxy[1], 0, img_h),
+                      clamp(pixel_xyxy[2], 0, img_w), clamp(pixel_xyxy[3], 0, img_h))
+    if mode == "absolute_source":
+        return [int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))]
+    if mode == "absolute_pixel":
+        from config import CFG
+        rw, rh = CFG.smart_resize(img_w, img_h)
+        return [int(round(x1 / img_w * rw)), int(round(y1 / img_h * rh)),
+                int(round(x2 / img_w * rw)), int(round(y2 / img_h * rh))]
+    return [int(round(x1 / img_w * scale)), int(round(y1 / img_h * scale)),
+            int(round(x2 / img_w * scale)), int(round(y2 / img_h * scale))]
 
 
 # ---------------------------------------------------------------- 输出格式

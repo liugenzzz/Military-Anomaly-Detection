@@ -605,6 +605,7 @@ def cmd_generate(args, onto):
                 "modality": s.modality, "kind": "describe", "facet": fa.kind, "anomaly": anomaly,
                 "question": q, "must_not": bans, "facts": facts,
                 "source_dataset": s.source_dataset, "license": s.license,
+                "view": s.view,
                 "width": s.width, "height": s.height,
                 "prompt": tmpl.format(
                     facts=facts_str, kind=fa.kind,
@@ -625,6 +626,7 @@ def cmd_generate(args, onto):
                 "modality": s.modality, "kind": "reason", "facet": "reason", "anomaly": anomaly,
                 "question": rq, "must_not": [], "facts": facts,
                 "source_dataset": s.source_dataset, "license": s.license,
+                "view": s.view,
                 "width": s.width, "height": s.height,
                 "prompt": reason_tmpl.format(
                     facts=json.dumps(trim_facts(facts, "reason"), ensure_ascii=False, indent=1),
@@ -768,7 +770,12 @@ def cmd_verify(args, onto):
                       "source_dataset": r["source_dataset"], "license": r["license"],
                       "image_width": r["width"], "image_height": r["height"],
                       "coordinate_mode": COORD_MODE, "bbox_scale": BOX_SCALE,
-                      "review": v or "skipped"}))
+                      "view": r.get("view", "uav"),
+                      # **永远是 dict**。原来通过时写 dict、跳过时写字符串
+                      # "skipped", 规则侧干脆没这个键 —— 下游一句
+                      # metadata["review"]["correct"] 就炸。
+                      "review": (v if isinstance(v, dict)
+                                 else {"status": "skipped"})}))
 
     base = Path(args.out)
     base.parent.mkdir(parents=True, exist_ok=True)

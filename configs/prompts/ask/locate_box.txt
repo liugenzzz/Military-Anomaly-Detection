@@ -2,7 +2,7 @@
 # 格式点明了答案才稳定。这一类占定位任务的 30%，不宜再多。
 #! task: locate_box
 #! forbid: 什么位置 在哪 哪一块 什么方位 哪条边
-#! max-len: 40
+#! max-len: 80
 框出画面中的{zh}区域。
 请给出{zh}的边界框坐标。
 以 [x1,y1,x2,y2] 格式输出{zh}的位置。
@@ -17,3 +17,10 @@
 用检测框圈出画面中的{zh}。
 框出{zh}并给出坐标。
 请标注{zh}的位置坐标。
+框出画面中的{zh}区域。以 JSON 输出，每项含 bbox_2d: [x1,y1,x2,y2] 与 label。
+请给出{zh}的边界框坐标。以 JSON 输出，每项含 bbox_2d: [x1,y1,x2,y2] 与 label。
+以 [x1,y1,x2,y2] 格式输出{zh}的位置。以 JSON 输出，每项含 bbox_2d: [x1,y1,x2,y2] 与 label。
+定位画面中的{zh}，给出坐标。以 JSON 输出，每项含 bbox_2d: [x1,y1,x2,y2] 与 label。
+标出{zh}的边界框。以 JSON 输出，每项含 bbox_2d: [x1,y1,x2,y2] 与 label。
+请用边界框标注该处{zh}。以 JSON 输出，每项含 bbox_2d: [x1,y1,x2,y2] 与 label。
+输出{zh}区域的归一化坐标。以 JSON 输出，每项含 bbox_2d: [x1,y1,x2,y2] 与 label。

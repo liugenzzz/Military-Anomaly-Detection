@@ -19,9 +19,34 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 HUMAN, GPT = "human", "gpt"
+
+
+def _rel(paths: list[str]) -> list[str]:
+    """按配置把绝对路径改写成相对 image_folder 的路径。
+
+    训练机和生成机的挂载点往往不一样, 数据里写死绝对路径, 换台机器就得全文替换。
+    LLaMA-Factory 支持 image_folder(或 media_dir), 相对路径更好搬。
+    """
+    try:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from config import CFG
+        root = CFG.get("output", "image_folder", default="") or ""
+        if not root or not CFG.get("output", "relative_paths", default=True):
+            return paths
+        out = []
+        for p in paths:
+            try:
+                out.append(str(Path(p).resolve().relative_to(Path(root).resolve())))
+            except ValueError:
+                out.append(p)                  # 不在 image_folder 底下, 保留绝对路径
+        return out
+    except Exception:                          # noqa: BLE001
+        return paths
 
 
 def make_row(*, sample_id: str, media_field: str, media: list[str], system: str,
@@ -33,7 +58,7 @@ def make_row(*, sample_id: str, media_field: str, media: list[str], system: str,
         conv.append({"from": HUMAN,
                      "value": (tok * len(media) + "\n" + q) if i == 0 else q})
         conv.append({"from": GPT, "value": a})
-    row = {"id": sample_id, media_field: media, "conversations": conv,
+    row = {"id": sample_id, media_field: _rel(media), "conversations": conv,
            "metadata": {**metadata, "n_turns": len(turns)}}
     if system:
         row["system"] = system

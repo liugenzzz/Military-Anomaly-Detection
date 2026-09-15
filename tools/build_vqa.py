@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ds.boxes import BBOX_SCALE, COORD_MODE, box_json, boxes_json, to_bbox2d  # noqa: E402
 from derive_events import _side  # noqa: E402  越界方向判定, 与派生端共用一份实现
 from facets import load_all, load_tool  # noqa: E402
+from config import CFG  # noqa: E402
 from sharegpt import make_row, meta_of  # noqa: E402
 from scene import Obj, Scene, load_scenes  # noqa: E402
 
@@ -85,6 +86,23 @@ def _frac(v: float) -> str:
     if abs(v - 0.75) < 0.04:
         return "四分之三处"
     return _TENTH[max(1, min(9, round(v * 10)))]
+
+
+_ZH = r"\u4e00-\u9fff"
+
+
+def zh_norm(t: str) -> str:
+    """中文与数字之间不留半角空格。
+
+    模板里 f"{n} 个目标" 这种写法很自然, 但落到中文句子里就是
+    "共观察到 9 架军用飞机" —— tokenizer 会把这个空格当成风格学走。
+    与其在几十处模板里逐个抠, 不如在出口统一处理一次。
+    bbox JSON 用的是紧凑分隔符, 本来就没有空格, 不受影响。
+    """
+    import re
+    t = re.sub(rf"([{_ZH}])\s+([0-9{_ZH}])", r"\1\2", t)
+    t = re.sub(rf"([0-9%])\s+([{_ZH}])", r"\1\2", t)
+    return t
 
 
 def _area_zh(v: float) -> str:
@@ -233,13 +251,7 @@ class RuleBuilder:
 
     def _mk(self, s: Scene, turns: list[tuple[str, str]], task: str, **extra) -> dict:
         field, paths = s.media
-        # 越界类的问题必须自带警戒线前提 —— 线是虚拟的, 不写进问题, 模型无从判断。
-        # 但只挂在真的与线有关的题上: 判定题答的是集结, 前面顶一句警戒线纯属噪声,
-        # 还会让模型以为"凡是提到线的场合答案就该跟越界有关"。
-        about_line = task.startswith("cross_") or (
-            task.startswith(("judge", "locate")) and self._has_cross(s))
-        if about_line and (pre := self.boundary_premise(s)):
-            turns = [(pre + turns[0][0], turns[0][1])] + list(turns[1:])
+        turns = [(zh_norm(q), zh_norm(a)) for q, a in turns]
         self._n += 1
         return make_row(
             sample_id=f"{s.image_id}_{task}_{self._n}",
@@ -251,7 +263,11 @@ class RuleBuilder:
                       "hard_negative": bool(s.meta.get("hard_negative")),
                       "source_dataset": s.source_dataset, "license": s.license,
                       "view": s.view, "image_width": s.width, "image_height": s.height,
-                      "coordinate_mode": COORD_MODE, "bbox_scale": BBOX_SCALE, **extra},
+                      "coordinate_mode": COORD_MODE, "bbox_scale": BBOX_SCALE,
+                      # 两条流水线的字段集必须一致 —— 规则侧缺 facet、LLM 侧缺 view,
+                      # 下游按 key 取值就会时有时无
+                      "facet": None, "review": {"status": "rule_deterministic"},
+                      **extra},
         )
 
     # -------------------------------------------------- 四类任务
@@ -278,9 +294,9 @@ class RuleBuilder:
                                     f"{what}，覆盖范围明显。"])
         if cls_hint:
             return self.rng.choice([
-                f"画面中可见 {cls_hint} 密集分布。",
-                f"共观察到 {cls_hint}，成簇分布。",
-                f"涉及 {cls_hint}。",
+                f"画面中可见{cls_hint}密集分布。",
+                f"共观察到{cls_hint}，成簇分布。",
+                f"涉及{cls_hint}。",
             ])
         return ""
 
@@ -316,7 +332,7 @@ class RuleBuilder:
                 by[o.cls] = by.get(o.cls, 0) + 1
             cls, n = max(by.items(), key=lambda kv: kv[1]) if by else ("目标", 0)
             what = self.count_phrase(s, cls, n) if n else "若干目标"
-            a = (f"未见异常。画面中虽有 {what} 密集成簇、达到了集结的规模条件，"
+            a = (f"未见异常。画面中虽有{what}密集成簇、达到了集结的规模条件，"
                  f"但均为民用目标，未见坦克、装甲车或军机等军事装备，属于正常场景。")
         else:
             a = self.rng.choice([
@@ -536,7 +552,7 @@ class RuleBuilder:
         cls, n = cc[0]
         mw, zh = MEASURE.get(cls, "个"), CLS_ZH.get(cls, cls)
         if self.rng.random() < 0.3:                       # 真陈述
-            claim = f"画面中有 {n} {mw}{zh}"
+            claim = f"画面中有{n}{mw}{zh}"
             return self._ask("correct", claim=claim), f"说法属实，画面中确为 {n} {mw}{zh}。"
         style = self.rng.random()
         if style < 0.5 and self._countable_exact(s, cls, n):   # 数量错(数得清才出)
@@ -579,7 +595,7 @@ class RuleBuilder:
         mw, zh = MEASURE.get(cls, "个"), CLS_ZH.get(cls, cls)
         q = self._ask("count_box", mw=mw, label=zh)
         body = boxes_json([(to_bbox2d(o.bbox, s.width, s.height), zh) for o in objs])
-        return q, f"共 {n} {mw}{zh}。\n{body}"
+        return q, f"共{n}{mw}{zh}。\n{body}"
 
     def temporal(self, s: Scene) -> tuple[str, str] | None:
         """时序题。**只出在视频/多帧上, 且只答轨迹能证明的事** ——
@@ -615,30 +631,47 @@ class RuleBuilder:
         return q, (f"越界发生在序列的{stage}（约第 {round(f * 100)}% 处）。"
                    f"序列开始时{who}还在界线一侧，随后移动并跨过界线。{more}")
 
-    def why(self, s: Scene) -> str | None:
-        """多轮里的第三轮"依据是什么"。只复述证据字段, 不做任何延伸判断。"""
-        ev = self._cluster(s)
-        if ev:
-            n = ev.evidence.get("count")
-            cls = "、".join(CLS_ZH.get(c, c) for c in ev.evidence.get("classes", [])[:3])
-            if ev.evidence.get("relaxed"):
-                return (f"依据是目标的空间密度：{n} 个{cls or '目标'}聚成一簇，间距小于周边，"
-                        f"但规模不大，只能算{self.zh.get(ev.type, '该类异常')}的迹象，"
-                        f"还不足以下确定结论。")
-            return (f"依据是目标的空间密度：{n} 个{cls or '目标'}的间距明显小于画面中"
-                    f"其他区域，聚成一簇，规模已达到{self.zh.get(ev.type, '该类异常')}的判定条件。")
-        cross = next((e for e in s.events if e.evidence.get("rule") == "boundary_cross"), None)
-        if cross:
-            reg = _region_zh(cross.evidence)
-            return (f"依据是目标的运动轨迹：其路径与{reg}相交，"
-                    f"起点与终点分处界线两侧，构成跨越。")
-        if s.meta.get("hard_negative"):
-            rs = s.meta.get("hard_negative_reason") or []
-            return ("依据是目标性质：" + (rs[0] if rs else "成簇目标均为民用，不构成军事集结") +
-                    "，因此不按异常处置。")
-        if not s.anomaly_types:
-            return "依据是逐项排查的结果：目标分布稀疏、无烟火迹象、无跨界移动，各项均未触发。"
-        return None
+    # ---------------------------------------------- 能力边界
+    UNANSWERABLE = [
+        ("型号", "画面分辨率不足以分辨具体型号，只能看出大致的目标类别，无法确认型号。"),
+        ("朝向", "目标在画面中只占很小一块，轮廓看不清，无法判断朝向。"),
+        ("颜色", "目标尺寸太小，像素有限，颜色难以准确分辨。"),
+        ("穿着", "航拍视角下人员只有几个像素，看不清衣着，无法判断。"),
+        ("归属", "画面里没有可供识别归属的标识，无法确认属于哪一方。"),
+        ("时间", "这是一张静止画面，看不出事件从什么时候开始，无法判断。"),
+        ("发展", "单帧画面给不出后续变化，无法判断接下来会怎么发展。"),
+        ("运动", "单帧看不出运动状态，无法判断目标是静止还是在移动。"),
+        ("起因", "画面只呈现了当前状态，看不出事件的起因。"),
+        ("逐个类型", "目标密集且单个尺寸很小，无法逐一分辨各自的具体类型。"),
+    ]
+
+    def unanswerable(self, s: Scene) -> tuple[str, str] | None:
+        """能力边界声明。**这是全批最该有的一类样本**。
+
+        现有开源 VLM 普遍 overclaim: 目标只有十几个像素也敢报型号, 单帧也敢说
+        火势在扩大。没有"看不出就说看不出"的样本, 微调只会把这个毛病放大。
+        挑的问题都是**这张图确实答不出来**的: 单帧问时序、小目标问型号颜色、
+        航拍问人员衣着。
+        """
+        tiny = False
+        if s.objects and s.width and s.height:
+            med = sorted(o.area for o in s.objects)[len(s.objects) // 2]
+            tiny = med / (s.width * s.height) < self.COUNT_MIN_AREA
+        single = s.modality == "image"
+        pool = []
+        for key, ans in self.UNANSWERABLE:
+            if key in ("型号", "朝向", "颜色", "穿着", "逐个类型") and not tiny:
+                continue
+            if key in ("时间", "发展", "运动") and not single:
+                continue
+            pool.append((key, ans))
+        if not pool:
+            return None
+        key, ans = self.rng.choice(pool)
+        lines = [q for q in self.asks["unanswerable"].lines]
+        idx = {"型号": 0, "朝向": 1, "颜色": 2, "穿着": 3, "归属": 4,
+               "时间": 5, "发展": 6, "运动": 7, "起因": 8, "逐个类型": 9}[key]
+        return lines[min(idx, len(lines) - 1)], ans
 
     def dense_region(self, s: Scene) -> tuple[str, str] | None:
         """困难负样本的"密集区在哪"。区域是真的, 只是它不构成异常 ——
@@ -656,111 +689,53 @@ class RuleBuilder:
         cls, n = max(by.items(), key=lambda kv: kv[1]) if by else ("目标", 0)
         what = self.count_phrase(s, cls, n) if n else "若干目标"
         return (self._ask("dense_region"),
-                f"{where}该区域聚集了 {what}，密度明显高于画面其他部分，"
+                f"{where}该区域聚集了{what}，密度明显高于画面其他部分，"
                 f"但均为民用目标，不属于需要上报的情况。")
 
-    # ---------------------------------------------- 越界专属题
-    @staticmethod
-    def _has_cross(s: Scene) -> bool:
-        return any(e.evidence.get("rule") == "boundary_cross" for e in s.events)
+    def why(self, s: Scene) -> str | None:
+        """多轮里的第三轮"依据是什么"。只复述证据字段, 不做任何延伸判断。
 
-    def cross_negative(self, s: Scene) -> tuple[str, str] | None:
-        """有警戒线、有活动目标、但**没人越线**。
-
-        这是越界这一类里最该有的样本: 不给它, 模型会学成"只要问到警戒线就答有越界"。
-        它天然是负样本, 而且数量管够 —— 序列里绝大多数帧本来就没有穿越发生。
+        **理由必须按异常类型分开**: 车队的理由是"排成一条、间距均匀", 不是集结的
+        "空间密度高" —— 套错模板会让第一轮结论和第三轮理由对不上, 那比没有理由更糟。
         """
-        if self._has_cross(s) or not s.regions or not s.tracks:
-            return None
-        n = len(s.tracks)
-        if n == 0:
-            return None
-        q = self._ask("cross_count")
-        return q, (f"没有目标越过这条线。画面中 {n} 个活动目标全程停留在线的同一侧，"
-                   f"各自的移动都未触及界线。")
-
-    def _cross_tracks(self, s: Scene) -> list[tuple[str, list[float], list[float]]]:
-        """越界目标的轨迹首尾点。(track_id, 起点, 终点)"""
-        out = []
-        for e in s.events:
-            if e.evidence.get("rule") != "boundary_cross":
-                continue
-            st, en = e.evidence.get("start"), e.evidence.get("end")
-            if st and en:
-                out.append((str(e.evidence.get("track_id")), list(st), list(en)))
-        return out
-
-    def cross_direction(self, s: Scene) -> tuple[str, str] | None:
-        """越界方向。**只说画面方位, 不说界内界外** ——
-        自动放置的是一条线, 线的两侧哪边算"内"根本无从判断, 硬说就是编。"""
-        tr = self._cross_tracks(s)
-        if not tr:
-            return None
-        dx = sum(e[0] - b[0] for _, b, e in tr) / len(tr)
-        dy = sum(e[1] - b[1] for _, b, e in tr) / len(tr)
-        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
-            return None
-        horiz = "自左向右" if dx > 0 else "自右向左"
-        vert = "自上而下" if dy > 0 else "自下而上"
-        if abs(dx) > 2.5 * abs(dy):
-            way = horiz
-        elif abs(dy) > 2.5 * abs(dx):
-            way = vert
-        else:
-            way = f"{horiz.replace('自', '自').replace('向', '偏')}{vert[1:]}"
-            way = f"{horiz}、同时{vert}"
-        who = CLS_ZH.get((s.events[0].evidence.get("cls") or ""), "目标")
-        n = len(tr)
-        tail = "，方向一致" if n > 1 and self._same_way(tr) else ""
-        return (self._ask("cross_direction"),
-                f"{n} 个{who}{way}穿过了界线{tail}。起始时位于界线一侧，"
-                f"结束时已越到另一侧。")
-
-    @staticmethod
-    def _same_way(tr) -> bool:
-        vs = [(e[0] - b[0], e[1] - b[1]) for _, b, e in tr]
-        ax = sum(v[0] for v in vs) / len(vs)
-        ay = sum(v[1] for v in vs) / len(vs)
-        return all(v[0] * ax + v[1] * ay > 0 for v in vs)
-
-    def cross_count(self, s: Scene) -> tuple[str, str] | None:
-        """越界计数。同时报"没越的那些" —— 只问越界数, 模型会学成
-        "画面里有几个动的就答几个"。"""
-        tr = self._cross_tracks(s)
-        if not tr:
-            return None
-        n_cross = len({t[0] for t in tr})
-        n_total = len(s.tracks) or len({o.track_id for o in s.objects if o.track_id is not None})
-        rest = max(0, n_total - n_cross)
-        q = self._ask("cross_count")
-        if rest:
-            return q, (f"{n_cross} 个目标越过了界线；另有 {rest} 个目标"
-                       f"全程停留在界线同一侧，未构成越界。")
-        return q, f"{n_cross} 个目标越过了界线，画面中的活动目标全部发生了越界。"
-
-    def boundary_premise(self, s: Scene) -> str:
-        """把虚拟警戒线**写进问题里**。
-
-        这条线是我们自己画的, 图上根本不存在。原先直接问"有几个目标越过了界线",
-        等于要模型对一个它看不见的前提作答 —— 那不是在教它看图, 是在教它猜。
-        真实的周界告警系统也是这么工作的: 线由系统给定, 模型判断的是"有没有跨过它"。
-        """
-        reg = next((r for r in s.regions if len(r.points) >= 2), None)
-        if reg is None:
-            return ""
-        (x1, y1), (x2, y2) = reg.points[0], reg.points[-1]
-        dx, dy = x2 - x1, y2 - y1
-        if abs(dx) > 2.5 * abs(dy):
-            shape = "近似水平横贯画面"
-        elif abs(dy) > 2.5 * abs(dx):
-            shape = "近似垂直纵贯画面"
-        else:
-            shape = "自左上向右下斜贯画面" if dx * dy > 0 else "自左下向右上斜贯画面"
-        mx = (max(0.0, min(s.width, x1)) + max(0.0, min(s.width, x2))) / 2
-        my = (max(0.0, min(s.height, y1)) + max(0.0, min(s.height, y2))) / 2
-        where = _zone(mx / max(1, s.width), my / max(1, s.height))
-        return f"设有一条{shape}、经过{where}的虚拟警戒线。"
-
+        ev = next((e for e in s.events if e.evidence.get("rule") == "linear_formation"), None)
+        if ev:
+            n = ev.evidence.get("count")
+            cv = ev.evidence.get("spacing_cv")
+            if isinstance(cv, float):
+                extra = ("，前后间距几乎没有起伏" if cv < 0.05
+                         else f"，前后间距的起伏在 {cv:.0%} 以内")
+            else:
+                extra = ""
+            return (f"依据是排布形态：{n} 个目标沿一条线首尾相接排开{extra}，"
+                    f"整体细长而非成片散布，与路边随机停放或拥堵车流的形态不同。")
+        ev = self._cluster(s)
+        if ev:
+            n = ev.evidence.get("count")
+            cls = "、".join(CLS_ZH.get(c, c) for c in ev.evidence.get("classes", [])[:3])
+            if ev.evidence.get("relaxed"):
+                return (f"依据是目标的空间密度：{n}个{cls or '目标'}聚成一簇，间距小于周边，"
+                        f"但规模不大，只能算{self.zh.get(ev.type, '该类异常')}的迹象，"
+                        f"还不足以下确定结论。")
+            return (f"依据是目标的空间密度：{n}个{cls or '目标'}的间距明显小于画面中"
+                    f"其他区域，聚成一簇，规模已达到{self.zh.get(ev.type, '该类异常')}的判定条件。")
+        ev = next((e for e in s.events if e.type == "disaster"), None)
+        if ev:
+            sub = ev.evidence.get("subtype") or ""
+            return (f"依据是地表状态的改变：{self.DISASTER_ZH.get(sub, '大范围地表异常')}，"
+                    f"受影响区域与周边未受影响的部分有明显分界。")
+        ev = next((e for e in s.events if e.type in ("smoke", "explosion")), None)
+        if ev:
+            what = "高亮度火光与其向外的骤降" if ev.type == "explosion" else "边界模糊的半透明烟团"
+            return (f"依据是可见的{what}，它遮住了下方的地表纹理，"
+                    f"说明位于地表之上而非地物本身的颜色。")
+        if s.meta.get("hard_negative"):
+            rs = s.meta.get("hard_negative_reason") or []
+            return ("依据是目标性质：" + (rs[0] if rs else "成簇目标均为民用，不构成军事集结") +
+                    "，因此不按异常处置。")
+        if not s.anomaly_types:
+            return "依据是逐项排查的结果：目标分布稀疏、无烟火迹象、无成队行进的车辆，各项均未触发。"
+        return None
 
     # -------------------------------------------------- 组装
     def build(self, s: Scene) -> list[dict]:
@@ -829,11 +804,9 @@ class RuleBuilder:
         if r.random() < DENSE_REGION_RATIO and (t := self.dense_region(s)):
             out.append(self._mk(s, [t], "dense_region"))
 
-        for ratio, fn, name in ((CROSS_DIR_RATIO, self.cross_direction, "cross_direction"),
-                                (CROSS_COUNT_RATIO, self.cross_count, "cross_count"),
-                                (CROSS_NEG_RATIO, self.cross_negative, "cross_negative")):
-            if r.random() < ratio and (t := fn(s)):
-                out.append(self._mk(s, [t], name))
+        # 能力边界声明 —— 专治 overclaim
+        if r.random() < CFG.task("unanswerable", 0.10) and (t := self.unanswerable(s)):
+            out.append(self._mk(s, [t], "unanswerable"))
 
         # 否定变体
         if r.random() < NEGATION_RATIO and (t := self.negation(s)):
