@@ -275,12 +275,19 @@ def derive_linear_formation(scene: Scene, rule: dict[str, Any], cls_id: str,
 
     xs = [c[0] for c in centers]
     ys = [c[1] for c in centers]
+    # 军用还是民用不再决定"算不算 convoy", 但必须记下来 —— 描述题要靠它区分
+    # 「装甲车队」和「卡车车队」, 配额也要靠它保证两种都有。
+    mil = {c.lower() for c in rule.get("military_classes", [])}
+    n_mil = sum(1 for o in objs if o.cls.lower() in mil)
     return [Event(
         type=cls_id,
         conf=round(min(1.0, r2 * (1.0 - cv)), 3),
         evidence={"rule": "linear_formation", "count": len(objs), "r2": round(r2, 4),
                   "spacing_cv": round(cv, 3), "elongation": round(elong, 2),
                   "main_class": main_cls,
+                  "military_grade": ("military" if n_mil >= max(1, len(objs) // 2)
+                                     else "mixed" if n_mil else "civil"),
+                  "n_military": n_mil,
                   "cluster_bbox": [min(xs), min(ys), max(xs), max(ys)],
                   "object_ids": [o.id for o in objs]},
     )]

@@ -170,6 +170,29 @@ def load_scenes(path: str | Path) -> list[Scene]:
 
 
 def dump_scenes(scenes: list[Scene], path: str | Path) -> None:
+    """写盘, 并**强制 image_id 唯一**。
+
+    image_id 是整条流水线的关联键: golden set 靠它排除泄漏、QC 靠它分组、
+    配额靠它去重。撞车了会错得极隐蔽 —— ERA 的 Test/ 与 Tra/ 两个划分下有
+    同名视频(Baseball_001), 而 image_id 里没带划分名, 于是 2112 段视频在
+    合并时被当成"重复"丢掉一半, 留哪一半还取决于文件顺序。
+    这种检查放在每个适配器里都会漏一个, 所以放在唯一的写盘出口上。
+    """
+    from collections import Counter
+    dup = [(i, n) for i, n in Counter(s.image_id for s in scenes).items() if n > 1]
+    if dup:
+        dup.sort(key=lambda kv: -kv[1])
+        ex = {i for i, _ in dup[:3]}
+        detail = []
+        for s in scenes:
+            if s.image_id in ex:
+                detail.append(f"    {s.image_id}  ->  {s.image_path}")
+        raise ValueError(
+            f"image_id 撞车: {len(dup)} 个 id 重复, 共 "
+            f"{sum(n - 1 for _, n in dup)} 条多余记录。前几个例子:\n"
+            + "\n".join(detail[:8])
+            + "\n  image_id 必须全局唯一 —— 下游 golden set 排除、QC 分组、配额"
+              "去重全靠它。\n  多半是 id 里漏了区分维度(数据划分 / 子目录 / 模态)。")
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("w", encoding="utf-8") as f:

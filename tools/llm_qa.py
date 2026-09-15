@@ -34,7 +34,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ds.boxes import BBOX_SCALE, COORD_MODE, box_json, to_bbox2d  # noqa: E402
-from build_vqa import region_box_of, scene_quality  # noqa: E402  与规则侧共用一套口径
+from build_vqa import CLS_ZH, region_box_of, scene_quality  # noqa: E402  与规则侧共用一套口径
 from sharegpt import make_row  # noqa: E402
 from facets import Facet, load_all
 from scene import Scene, load_scenes
@@ -156,6 +156,18 @@ def build_facts(scene: Scene, onto: dict[str, Any], max_objects: int = 30) -> di
             ev["object_class"] = d.get("cls")
         if "r2" in d:
             ev["collinearity"] = d["r2"]
+        if d.get("rule") == "linear_formation":
+            # 车队放开 require_any 之后, 民用车队也会成事件。**必须把"军用还是
+            # 民用"明确交给模型**, 否则它只能从目标列表里猜 —— 猜错就会把六辆
+            # 民用卡车写成装甲车队, 而这正是当初加 require_any 要防的那件事。
+            ev["military_grade"] = d.get("military_grade")
+            ev["main_class"] = d.get("main_class")
+            ev["main_class_zh"] = CLS_ZH.get(str(d.get("main_class", "")).lower(),
+                                             d.get("main_class"))
+            if isinstance(d.get("spacing_cv"), (int, float)):
+                ev["spacing_evenness"] = round(1.0 - float(d["spacing_cv"]), 2)
+            if "elongation" in d:
+                ev["elongation"] = d["elongation"]
         events.append(ev)
 
     return {

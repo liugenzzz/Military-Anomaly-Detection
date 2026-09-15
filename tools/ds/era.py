@@ -165,6 +165,12 @@ def build(root: str, frames_dir: str | None = None, n_frames: int = 3,
 
     for cls_dir in _class_dirs_all(r):
         label = _norm_label(cls_dir.name)
+        # **id 必须带上数据划分。** ERA 官方把同一批编号分放在 Test/ 与 Train/
+        # (用户磁盘上那个叫 Tra/)两个目录下, Test/Baseball/Baseball_001 和
+        # Tra/Baseball/Baseball_001 是**两段不同的视频**。id 里不带划分名,
+        # 2112 段就会在合并时被当成重复丢掉一半。
+        split = _norm_label(cls_dir.parent.name) if cls_dir.parent != r else ""
+        tag = f"{split}_" if split else ""
         if label in EXCLUDE:
             n = sum(1 for x in cls_dir.iterdir()
                     if x.is_file() and x.suffix.lower() in VID_EXT)
@@ -203,13 +209,13 @@ def build(root: str, frames_dir: str | None = None, n_frames: int = 3,
 
             if modality in ("video", "both"):
                 scenes.append(Scene(
-                    image_id=f"{DATASET}_{label}_{stem}",
+                    image_id=f"{DATASET}_{tag}{label}_{stem}",
                     image_path=str(vid), modality="video", video_path=str(vid),
                     width=640, height=640,
                     source_dataset=DATASET, license=LICENSE, view=view,
                     events=_events(),
                     caption=caption_list[0] if caption_list else None,
-                    meta={"src_video": vid.name, "src_label": cls_dir.name,
+                    meta={"src_video": vid.name, "src_label": cls_dir.name, "split": split,
                           "duration_s": 5, "all_captions": caption_list}))
 
             if modality in ("frame", "both"):
@@ -220,12 +226,12 @@ def build(root: str, frames_dir: str | None = None, n_frames: int = 3,
                 for fi, fp in enumerate(frames):
                     w, h = image_size(fp)
                     scenes.append(Scene(
-                        image_id=f"{DATASET}_{label}_{stem}_frame{fi}",
+                        image_id=f"{DATASET}_{tag}{label}_{stem}_frame{fi}",
                         image_path=str(fp), width=w or 640, height=h or 640,
                         source_dataset=DATASET, license=LICENSE, view=view,
                         events=_events(),
                         caption=caption_list[fi % len(caption_list)] if caption_list else None,
-                        meta={"src_video": vid.name, "src_label": cls_dir.name,
+                        meta={"src_video": vid.name, "src_label": cls_dir.name, "split": split,
                               "frame_idx": fi, "all_captions": caption_list}))
             stat["anomaly" if kind else "normal"] += 1
 
@@ -244,7 +250,8 @@ def build_single_frames(root: str, view: str = "uav",
     """ERA 官方的 SingleFrames/ 单帧分类数据。
 
     与视频样本互补: 视频教模型看运动, 单帧教它从静态画面判断。两者都要,
-    但 image_id 前缀不同, 不会被当成重复。
+    但 image_id 前缀不同(ERA- 对 ERA-SF-), 不会互相撞车。
+    **各自内部**的撞车则靠 id 里带数据划分来避免 —— 见下面 split。
     """
     r = Path(root)
     sf = next((d for d in (r / "SingleFrames", r) if d.is_dir()), None)
@@ -274,6 +281,9 @@ def build_single_frames(root: str, view: str = "uav",
             stat["unknown"] += len(imgs)
             continue
 
+        # 同视频侧: 单帧目录一样分 Train/ 与 Test/, 同名文件在两边各一份
+        split = _norm_label(d.parent.name) if d.parent != sf else ""
+        tag = f"{split}_" if split else ""
         for img in sorted(imgs):
             w, h = image_size(img)
             events = []
@@ -283,10 +293,10 @@ def build_single_frames(root: str, view: str = "uav",
                     ev["subtype"] = subtype
                 events = [Event(type=kind, conf=1.0, evidence=ev)]
             scenes.append(Scene(
-                image_id=f"{DATASET}-SF_{label}_{img.stem.strip()}",
+                image_id=f"{DATASET}-SF_{tag}{label}_{img.stem.strip()}",
                 image_path=str(img), width=w or 640, height=h or 640,
                 source_dataset=DATASET + "-SingleFrames", license=LICENSE, view=view,
-                events=events, meta={"src_label": d.name}))
+                events=events, meta={"src_label": d.name, "split": split}))
         stat["anomaly" if kind else "normal"] += len(imgs)
 
     print(f"[{DATASET}-SingleFrames] {len(scenes)} 张单帧 "

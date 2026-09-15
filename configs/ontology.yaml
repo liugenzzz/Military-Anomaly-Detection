@@ -16,7 +16,7 @@
 #   - v0.2.1: 军用/民用目标分开命名(military-plane vs civil-plane),
 #     民用机场机群与民用港口因此成为困难负样本而非误标为集结
 
-version: "0.5.1"
+version: "0.5.2"
 box_scale: 1000                 # grounding 坐标归一化上限, Qwen-VL 系列用 1000
 negative_ratio_target: 0.30     # normal 样本占比下限
 qa_per_anomaly_target: 25000    # 每个异常类的 QA 条数目标
@@ -188,8 +188,28 @@ classes:
       max_spacing_cv: 0.45        # 间距变异系数上限 —— 超过就是车流不是车队
       min_elongation: 4.0         # 主轴跨度 / 垂直跨度 —— 低于这个是一片, 属集结
       min_same_class_ratio: 0.7   # 同型占比 —— 低于这个是混杂车流
-      require_any: ["military-truck", "military-vehicle", "armored", "tank"]
-      on_require_fail: hard_negative
+      # v0.5.2: **去掉 require_any 的军事目标约束。**
+      # 原来要求簇里必须含 military-truck/military-vehicle/armored/tank，
+      # 结果全库产量为 0 —— 只有 Mendeley 有 tank，而它每图目标中位数是 1、
+      # 九成分位才 5，640x640 的裁剪图凑不出五辆共线坦克。
+      #
+      # 撤掉这条的依据是：**"车队机动"本身并不必然是军用**，而且把民用车流
+      # 排除掉的活儿，上面四条判据已经干完了 —— 造了七种对照场景实测：
+      #   坦克列 / 军卡列          -> 命中
+      #   混杂车流(车型杂)          -> 不命中
+      #   间距忽大忽小(走走停停)     -> 不命中
+      #   停车场式一片(不细长)       -> 归 massing 而非 convoy
+      #   只有四辆(低于 min_count)   -> 不命中
+      # 也就是说 require_any 在这里是**第五道**约束，不是唯一那道。
+      #
+      # 代价说清楚：民用卡车车队现在会判成 convoy。这是有意的 —— 训练目标是
+      # "认出成队行进的车列"，至于是不是军用，交给 military_grade 这个证据字段
+      # 和描述题去表达，而不是在事件层面一刀切掉。
+      # 要退回旧行为：把下面两行取消注释即可。
+      # require_any: ["military-truck", "military-vehicle", "armored", "tank"]
+      # on_require_fail: hard_negative
+      military_classes: ["military-truck", "military-vehicle", "armored", "tank",
+                         "military-plane", "military-helicopter", "warship"]
       relax:
         min_count: 4
         collinearity_r2: 0.88
