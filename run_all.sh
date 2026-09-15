@@ -16,6 +16,7 @@ VLM_MODEL="${VLM_MODEL:-Qwen3.8-27B}"
 # 端点池配置(推荐)。填了它就不用 VLM_BASE_URL, 每一路各带自己的 model 与 key。
 #   cp configs/endpoints.yaml.example configs/endpoints.local.yaml   # 再填真实 key
 ENDPOINTS="${ENDPOINTS:-}"
+[ -z "$ENDPOINTS" ] && [ -f configs/generate.yaml ] && ENDPOINTS=configs/generate.yaml
 [ -z "$ENDPOINTS" ] && [ -f configs/endpoints.local.yaml ] && ENDPOINTS=configs/endpoints.local.yaml
 # review 最好换一个模型: 同一个模型审自己写的答案基本全过, 六维形同虚设
 REVIEW_MODEL="${REVIEW_MODEL:-$VLM_MODEL}"
@@ -152,6 +153,10 @@ INLINE=(); [ "$INLINE_IMAGES" = "1" ] && INLINE=(--inline-images)
 if [ -n "$VLM_BASE_URL" ] || [ -n "$ENDPOINTS" ]; then
   if [ -n "$ENDPOINTS" ]; then WHERE="端点池 $ENDPOINTS"; else WHERE="$VLM_MODEL @ $VLM_BASE_URL"; fi
   step "6a. LLM 生成描述/推理 ($WHERE)"
+  # 先体检一遍。某一路模型名对不上, 那一路的产出全是废的, 早发现早改
+  $PY tools/llm_qa.py ping ${ENDPOINTS:+--endpoints "$ENDPOINTS"} \
+      ${VLM_BASE_URL:+--base-url "$VLM_BASE_URL"} --model "$VLM_MODEL" 2>&1 | sed 's/^/  /'
+
   run $PY tools/llm_qa.py generate --scenes "$KEPT" \
       --facets-per-image "$FACETS_PER_IMAGE" --target-per-class "$LLM_TARGET" \
       $( [ "$LLM_SAMPLE" != 0 ] && echo "--sample $LLM_SAMPLE" ) ${ENDPOINTS:+--endpoints "$ENDPOINTS"} ${VLM_BASE_URL:+--base-url "$VLM_BASE_URL"} \

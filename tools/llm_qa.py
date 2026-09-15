@@ -214,7 +214,13 @@ def load_endpoints(path: str | None, role: str, model: str,
     """
     if path:
         cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
-        group = cfg.get(role) or cfg.get("generate") or []
+        # 两种写法都认: configs/generate.yaml 把端点嵌在 endpoints: 底下,
+        # 早期的 endpoints.yaml.example 直接放在顶层。只认一种的话, 另一种会静默
+        # 退回默认的 OpenAI 地址 —— 表现是"配了端点却连不上外网"。
+        src = cfg.get("endpoints") if isinstance(cfg.get("endpoints"), dict) else cfg
+        group = src.get(role)
+        if group is None:
+            group = src.get("generate") or []
         if group:
             out = []
             for e in group:
@@ -543,6 +549,88 @@ def plan_quota(scenes: list[Scene], facets: dict[str, list[Facet]], target: int,
     return plan
 
 
+def cmd_ping(args, onto):
+    if not args.endpoints and Path("configs/generate.yaml").exists():
+        args.endpoints = "configs/generate.yaml"
+
+    """逐路体检端点池。**开跑之前先跑这个** —— 七万条请求跑到一半才发现
+    某一路的模型名不对, 那一路的产出全是废的。
+
+    检四件事:
+      1. 通不通            —— 连不上还是 401/403
+      2. 服务的模型名叫什么 —— vLLM 的 model 字段必须和 --served-model-name 完全一致,
+                             常见坑是服务端用的是模型路径而配置里写的是简称
+      3. 文本能不能生成
+      4. **认不认图**       —— 发一张 1x1 的内联图试一次。纯文本模型在这套流程里
+                             只能写描述、读不了图, 必须提前发现
+    """
+    import base64
+    import urllib.request
+
+    tiny_png = base64.b64encode(bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+        "890000000a49444154789c6360000002000100ffff030000060005"
+        "57bfabd40000000049454e44ae426082")).decode()
+
+    for role in ("generate", "review", "screen"):
+        pool = load_endpoints(args.endpoints, role, args.model, args.base_url)
+        if role != "generate" and not args.endpoints:
+            break
+        cfg_group = {}
+        if args.endpoints:
+            cfg_group = yaml.safe_load(Path(args.endpoints).read_text(encoding="utf-8")) or {}
+            _src = (cfg_group.get("endpoints")
+                    if isinstance(cfg_group.get("endpoints"), dict) else cfg_group)
+            raw = _src.get(role) or []
+            if not raw and role != "generate":
+                print(f"\n[{role}] 未配置" +
+                      ("  ← 审稿没有独立模型, 会退回 generate 池, 六维 review 形同虚设"
+                       if role == "review" else ""))
+                continue
+        print(f"\n[{role}] {len(pool)} 路")
+        for e in pool:
+            tag = f"  {e.name:14s} {e.url}"
+            # 1) /v1/models
+            served = None
+            try:
+                req = urllib.request.Request(f"{e.url}/models",
+                                             headers={"Authorization": f"Bearer {e.key}"})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    served = [m.get("id") for m in json.loads(r.read()).get("data", [])]
+            except Exception as ex:                      # noqa: BLE001
+                print(f"{tag}\n      ✗ /v1/models 不通: {type(ex).__name__}: {ex}")
+                continue
+            hit = e.model in (served or [])
+            mark = "✓" if hit else "✗"
+            print(f"{tag}\n      {mark} 服务的模型: {served}   配置写的: {e.model}")
+            if not hit:
+                print(f"      ↑ **对不上**。model 字段必须和服务端完全一致, "
+                      f"把配置里的 model 改成上面列出的名字")
+                continue
+            # 2) 文本
+            one = LLM(e.model, e.url, cache_dir=None, temperature=0.0)
+            one.pool = [e]
+            one.ring = [e]
+            try:
+                txt = one.chat([{"role": "user", "content": "回答两个字：收到"}],
+                               json_mode=False)
+                print(f"      ✓ 文本生成: {txt.strip()[:20]}")
+            except Exception as ex:                      # noqa: BLE001
+                print(f"      ✗ 文本生成失败: {str(ex)[:90]}")
+                continue
+            # 3) 认不认图
+            try:
+                msg = [{"role": "user", "content": [
+                    {"type": "image_url",
+                     "image_url": {"url": f"data:image/png;base64,{tiny_png}"}},
+                    {"type": "text", "text": "这是什么颜色？"}]}]
+                one.chat(msg, json_mode=False)
+                print("      ✓ 接受图像输入")
+            except Exception as ex:                      # noqa: BLE001
+                print(f"      ✗ **不接受图像输入**: {str(ex)[:90]}")
+                print("      ↑ 这一路只能做纯文本, 描述题需要看图, 不能用它")
+
+
 def cmd_generate(args, onto):
     tmpl = load_prompt("describe_gen.txt", args.prompt_dir + "/_tools")
     reason_tmpl = load_prompt("reason_gen.txt", args.prompt_dir + "/_tools")
@@ -862,6 +950,16 @@ def main() -> None:
         p.add_argument("--exclude-ids", default=None,
                        help="golden set 的 image_id 清单, 必须排除否则泄漏(make_golden.py 产出)")
 
+    p = sub.add_parser("ping", help="逐路体检端点池(开跑前先跑这个)")
+    p.add_argument("--ontology", default="configs/ontology.yaml")
+    p.add_argument("--prompt-dir", default="configs/prompts")
+    p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument("--base-url", default=None)
+    p.add_argument("--endpoints", default=None,
+                   help="端点池 yaml。不填就读 configs/generate.yaml")
+    p.set_defaults(out="/dev/null", cache_dir=None, workers=1,
+                   inline_images=False, dry_run=False, exclude_ids=None)
+
     p = sub.add_parser("screen", help="闸5 图像质检")
     p.add_argument("--scenes", required=True); common(p)
 
@@ -894,7 +992,8 @@ def main() -> None:
     args = ap.parse_args()
     onto = yaml.safe_load(Path(args.ontology).read_text(encoding="utf-8"))
     globals()["BOX_SCALE"] = int(onto.get("box_scale", BOX_SCALE))
-    {"screen": cmd_screen, "generate": cmd_generate, "verify": cmd_verify}[args.cmd](args, onto)
+    {"ping": cmd_ping, "screen": cmd_screen,
+     "generate": cmd_generate, "verify": cmd_verify}[args.cmd](args, onto)
 
 
 if __name__ == "__main__":
