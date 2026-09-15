@@ -334,13 +334,44 @@ def collect_rules(ontology: dict[str, Any]) -> list[tuple[str, str | None, dict[
     return out
 
 
+def resolve_overlap(scene: Scene) -> None:
+    """车队优先于集结。
+
+    同一批车排成一列, 密度聚类同样会判成"密集成簇" —— 但"聚成一片"和"拉成一条"
+    是两回事, 判定答案说"异常聚集"就错了。两个事件覆盖同一批目标时, 保留更具体
+    的那个(车队)。
+
+    **放宽档补量之后必须再调一次**: relax_pass 跑在 derive 之后, 会把同一批目标
+    重新补一个集结事件回去, 只在第一遍做互斥是兜不住的。
+    """
+    conv_ids = {i for e in scene.events if e.type == "convoy"
+                for i in e.evidence.get("object_ids", [])}
+    if not conv_ids:
+        return
+    kept = []
+    for e in scene.events:
+        ids = set(e.evidence.get("object_ids", []))
+        overlap = len(ids & conv_ids) / max(1, len(ids))
+        if e.type != "convoy" and e.evidence.get("rule") == "density_cluster" \
+                and overlap >= 0.6:
+            continue
+        kept.append(e)
+    scene.events = kept
+
+
 def derive(scenes: list[Scene], ontology: dict[str, Any], overwrite: bool = False) -> list[Scene]:
     rules = collect_rules(ontology)
     for scene in scenes:
         if overwrite:
-            scene.events = [e for e in scene.events if e.evidence.get("rule") is None]
+            # **只清本文件能重算的那几种事件**。原来的写法是"丢掉所有带 rule 字段的",
+            # 但适配器给的标签迁移事件(烟雾/爆炸/灾害)同样带 rule: label_transfer,
+            # 而 _DISPATCH 里没有它 —— 清掉就再也算不回来了。
+            # 实测: --overwrite 一跑, smoke/explosion/disaster 三类全部消失。
+            scene.events = [e for e in scene.events
+                            if e.evidence.get("rule") not in _DISPATCH]
             scene.meta.pop("hard_negative", None)
             scene.meta.pop("hard_negative_reason", None)
+            scene.meta.pop("hard_negative_bbox", None)
         existing = {(e.type, str(sorted(e.evidence.items()))) for e in scene.events}
         for cls_id, subtype, rule in rules:
             for ev in _DISPATCH[rule["kind"]](scene, rule, cls_id, subtype):
@@ -348,21 +379,7 @@ def derive(scenes: list[Scene], ontology: dict[str, Any], overwrite: bool = Fals
                 if key not in existing:
                     existing.add(key)
                     scene.events.append(ev)
-        # 车队优先于集结。同一批车排成一列, 密度聚类同样会判成"密集成簇" ——
-        # 但"聚成一片"和"拉成一条"是两回事, 判定答案说"异常聚集"就错了。
-        # 两个事件覆盖同一批目标时, 保留更具体的那个(车队)。
-        conv = [e for e in scene.events if e.type == "convoy"]
-        if conv:
-            conv_ids = {i for e in conv for i in e.evidence.get("object_ids", [])}
-            kept = []
-            for e in scene.events:
-                ids = set(e.evidence.get("object_ids", []))
-                overlap = len(ids & conv_ids) / max(1, len(ids))
-                if e.type != "convoy" and e.evidence.get("rule") == "density_cluster" \
-                        and overlap >= 0.6:
-                    continue                       # 同一批目标, 让位给车队
-                kept.append(e)
-            scene.events = kept
+        resolve_overlap(scene)
 
         # 事件与困难负样本互斥: 有真事件就不是负样本
         if scene.events:
@@ -425,6 +442,8 @@ def relax_pass(scenes: list[Scene], ontology: dict[str, Any], below: int,
             n += 1
         if n:
             added[key] = n
+    for scene in scenes:
+        resolve_overlap(scene)      # 补量可能把让过位的集结又加回来了
     return added
 
 
