@@ -2,6 +2,13 @@
 
 <https://github.com/VisDrone/DroneCrowd>
 
+官方发布的目录树长这样（**顶层目录直接传给 --root 就行，不用单独指标注目录**）:
+
+    DroneCrowd/
+      train_data/images/img001001.jpg   <- img + 三位序列号 + 三位帧号, 所有帧平铺
+      train_data/ground_truth/00001.mat
+      val_data/…  test_data/…
+
 处理要点:
   - 标注是**人头点**不是 bbox。点转成 ±half 的小方框, 统一走 bbox 逻辑;
     密度聚类只用中心点, 所以框的大小不影响聚集判定

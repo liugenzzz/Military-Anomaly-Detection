@@ -99,8 +99,13 @@ def main() -> None:
     add_out(p)
 
     p = sub.add_parser("dronecrowd", help="DroneCrowd 密集人群(点标注)")
-    p.add_argument("--root", required=True)
-    p.add_argument("--ann-dir"); p.add_argument("--stride", type=int, default=8)
+    p.add_argument("--root", required=True,
+                   help="DroneCrowd 顶层目录即可(底下的 train_data/val_data/test_data "
+                        "会递归扫到)，例如 .../military/DroneCrowd")
+    p.add_argument("--ann-dir",
+                   help="标注目录。**一般不用传** —— 缺省就在 --root 底下递归找 "
+                        "ground_truth/*.mat|*.txt。只有标注和图像不在同一棵树下才需要")
+    p.add_argument("--stride", type=int, default=8)
     p.add_argument("--head-half", type=float, default=8.0)
     p.add_argument("--view", default="uav")
     add_out(p)
