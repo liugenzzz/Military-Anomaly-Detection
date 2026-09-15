@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import math
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -83,7 +84,7 @@ def derive_density_cluster(scene: Scene, rule: dict[str, Any], cls_id: str,
     targets = {c.lower() for c in rule["target_classes"]}
     objs = scene.of_classes(targets)
     if len(objs) < rule["min_cluster_size"]:
-        return []
+        return _veto(cls_id, f"目标数不足(<{rule['min_cluster_size']})")
 
     # 交通否决: 同框有成规模的车辆/摩托 -> 这是城市街景的人流, 不是聚集
     veto_cls = {c.lower() for c in rule.get("traffic_veto_classes", [])}
@@ -99,7 +100,7 @@ def derive_density_cluster(scene: Scene, rule: dict[str, Any], cls_id: str,
                 scene.meta.setdefault("hard_negative_bbox",
                                       [min(c[0] for c in cs), min(c[1] for c in cs),
                                        max(c[0] for c in cs), max(c[1] for c in cs)])
-            return []
+            return _veto(cls_id, "同框交通目标过多(城市人流)")
 
     require = {c.lower() for c in rule.get("require_any", [])}
     on_fail = rule.get("on_require_fail")
@@ -108,9 +109,11 @@ def derive_density_cluster(scene: Scene, rule: dict[str, Any], cls_id: str,
     events = []
     for group in _union_find_cluster(centers, eps):
         if len(group) < rule["min_cluster_size"]:
+            REJECTS[cls_id][f"单簇规模不足(<{rule['min_cluster_size']})"] += 1
             continue
         cls_in_group = {objs[i].cls.lower() for i in group}
         if require and not (cls_in_group & require):
+            REJECTS[cls_id]["不含军事目标(require_any)"] += 1
             if on_fail == "hard_negative":
                 scene.meta["hard_negative"] = True
                 scene.meta.setdefault("hard_negative_reason", []).append(
@@ -176,6 +179,32 @@ def _axis_project(centers: list[tuple[float, float]]) -> list[float]:
     return sorted((p[0] - mx) * ux + (p[1] - my) * uy for p in centers), (ux, uy)
 
 
+# ---------------------------------------------------------------- 否决记账
+# 规则跑完只说"convoy 0"是没法排查的 —— 到底是根本没有候选目标, 还是候选一路
+# 过关却卡在最后的 require_any? 前者要补数据, 后者改一行配置就行, 两件事的
+# 成本差着量级。所以每一处 return [] 都记下死在哪一关, 跑完按类打出来。
+REJECTS: dict[str, "Counter[str]"] = defaultdict(Counter)
+
+
+def _veto(cls_id: str, reason: str) -> list:
+    REJECTS[cls_id][reason] += 1
+    return []
+
+
+def reject_report() -> str:
+    if not REJECTS:
+        return ""
+    out = ["\n候选为什么没成事件(按类):"]
+    for cls_id in sorted(REJECTS):
+        items = REJECTS[cls_id].most_common()
+        out.append(f"  {cls_id}: " + ", ".join(f"{k} {v}" for k, v in items))
+    out.append("  ↑ 「不含军事目标」占多数 = 规则没问题, 是数据里没有这类目标, "
+               "改 require_any 或换数据源;")
+    out.append("    「目标数不足」占多数 = 门槛高了或该类素材本来就稀, "
+               "先看 relax 档能捡回多少。")
+    return "\n".join(out)
+
+
 def derive_linear_formation(scene: Scene, rule: dict[str, Any], cls_id: str,
                            subtype: str | None = None) -> list[Event]:
     """车队 / 列队机动。
@@ -191,12 +220,12 @@ def derive_linear_formation(scene: Scene, rule: dict[str, Any], cls_id: str,
     targets = {c.lower() for c in rule["target_classes"]}
     objs = scene.of_classes(targets)
     if len(objs) < rule["min_count"]:
-        return []
+        return _veto(cls_id, f"目标数不足({len(objs)}<{rule['min_count']})")
     centers = [o.center for o in objs]
 
     r2 = _r_squared(centers)
     if r2 < rule["collinearity_r2"]:
-        return []
+        return _veto(cls_id, "不共线")
 
     proj, axis = _axis_project(centers)
     gaps = [b - a for a, b in zip(proj, proj[1:])]
@@ -207,7 +236,7 @@ def derive_linear_formation(scene: Scene, rule: dict[str, Any], cls_id: str,
         return []
     cv = (sum((g - mean_gap) ** 2 for g in gaps) / len(gaps)) ** 0.5 / mean_gap
     if cv > rule.get("max_spacing_cv", 0.45):
-        return []                                  # 间距忽大忽小 —— 是车流不是车队
+        return _veto(cls_id, "间距不均(是车流不是车队)")
 
     # 细长度: 沿主轴的跨度 / 垂直方向的跨度
     ux, uy = axis
@@ -216,14 +245,14 @@ def derive_linear_formation(scene: Scene, rule: dict[str, Any], cls_id: str,
     span_perp = max(perp) - min(perp)
     elong = span_long / max(1.0, span_perp)
     if elong < rule.get("min_elongation", 4.0):
-        return []                                  # 是一片不是一条 —— 那是集结, 不是车队
+        return _veto(cls_id, "不够细长(是一片, 归集结)")
 
     by_cls: dict[str, int] = {}
     for o in objs:
         by_cls[o.cls.lower()] = by_cls.get(o.cls.lower(), 0) + 1
     main_cls, main_n = max(by_cls.items(), key=lambda kv: kv[1])
     if main_n / len(objs) < rule.get("min_same_class_ratio", 0.7):
-        return []                                  # 车型杂 —— 是车流不是车队
+        return _veto(cls_id, "车型杂(是车流不是车队)")
 
     require = {c.lower() for c in rule.get("require_any", [])}
     if require and not (set(by_cls) & require):
@@ -235,7 +264,7 @@ def derive_linear_formation(scene: Scene, rule: dict[str, Any], cls_id: str,
             ys = [c[1] for c in centers]
             scene.meta.setdefault("hard_negative_bbox",
                                   [min(xs), min(ys), max(xs), max(ys)])
-        return []
+        return _veto(cls_id, "不含军事目标(require_any)")
 
     xs = [c[0] for c in centers]
     ys = [c[1] for c in centers]
@@ -501,6 +530,14 @@ def main() -> None:
     if n_hard:
         print(f"\n  困难负样本 = 规模达标但不含军事目标的聚集(如民用停车场), "
               f"占正常样本 {n_hard / max(1, n_normal):.1%}")
+    # 本体里启用了却一条都没产出的类, 必须点名 —— 这是开跑前最该拦住的事。
+    enabled = {c["id"] for c in ontology.get("classes", [])
+               if c["id"] != "normal" and c.get("enabled", True)}
+    got = {k.split("/")[0] for k in hist}
+    if (zero := enabled - got):
+        print(f"\n⚠ 启用了但一条都没触发的类: {sorted(zero)}")
+    if (rep := reject_report()):
+        print(rep)
 
 
 if __name__ == "__main__":
