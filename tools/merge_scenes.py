@@ -28,7 +28,21 @@ NEEDED = {"image_id", "image_path", "width", "height"}
 # 一眼就该跳过的: derive 的产物、LLM 请求体、演示与测试数据
 SKIP_SUFFIX = ("_ev.jsonl",)
 SKIP_STEMS = {"llm_requests", "gen_req", "rev_req", "requests", "responses"}
-DEMO_HINTS = ("demo", "test", "sample", "ontology_test")
+# **按整词匹配, 不按子串。** 子串匹配会把 VisDrone 的 vd_mot_testdev 当成
+# "测试数据"跳掉 —— 那是 MOT 的 test-dev 划分, 是正经语料, 不是演示数据。
+# 一个静默丢掉整个数据划分的启发式, 比没有启发式更糟。
+DEMO_HINTS = {"demo", "test", "tests", "sample", "samples", "dummy", "toy"}
+
+
+def _tokens(stem: str) -> set[str]:
+    out, cur = set(), ""
+    for ch in stem.lower():
+        if ch.isalnum():
+            cur += ch
+        else:
+            out.add(cur); cur = ""
+    out.add(cur)
+    return out - {""}
 
 
 def looks_like_scenes(path: Path) -> tuple[bool, str]:
@@ -62,12 +76,23 @@ def pick_files(inputs: list[str], keep_ev: bool, keep_demo: bool) -> tuple[list[
             skip.append((p, "derive_events 的产物(加 --include-ev 可保留)"))
         elif p.stem in SKIP_STEMS:
             skip.append((p, "不是 scene 文件(LLM 请求体之类)"))
-        elif not keep_demo and any(h in p.stem.lower() for h in DEMO_HINTS):
+        elif not keep_demo and (_tokens(p.stem) & DEMO_HINTS):
             skip.append((p, "演示/测试数据(加 --include-demo 可保留)"))
         else:
             ok, why = looks_like_scenes(p)
             (take if ok else skip).append(p if ok else (p, why))
     return take, skip
+
+
+def _differs(a: dict, b: dict) -> str:
+    """同一个 image_id 的两条记录差在哪。空串 = 完全相同。"""
+    keys = ("modality", "source_dataset", "image_path", "video_path")
+    d = [f"{k}: {a.get(k)!r} vs {b.get(k)!r}" for k in keys if a.get(k) != b.get(k)]
+    if not d:
+        for k in ("objects", "events", "frames"):
+            if len(a.get(k) or []) != len(b.get(k) or []):
+                d.append(f"{k} 条数 {len(a.get(k) or [])} vs {len(b.get(k) or [])}")
+    return "; ".join(d)
 
 
 def main() -> None:
@@ -81,6 +106,8 @@ def main() -> None:
     ap.add_argument("--include-demo", action="store_true", help="连 demo/test 数据一起合")
     ap.add_argument("--exclude", nargs="*", default=[],
                     help="要排除的文件名(可写 stem, 如 d 或 d.jsonl)")
+    ap.add_argument("--allow-dup", action="store_true",
+                    help="即使存在「同 id 不同内容」也继续(默认直接退出)")
     ap.add_argument("--dry-run", action="store_true", help="只报告会合哪些, 不写文件")
     args = ap.parse_args()
 
@@ -98,10 +125,11 @@ def main() -> None:
                          "data/interim/*.jsonl。")
     print(f"\n合并 {len(take)} 个文件:")
 
-    seen: dict[str, Path] = {}
+    seen: dict[str, tuple[Path, int, dict]] = {}
     rows: list[str] = []
     by_ds: Counter = Counter()
-    dup: dict[str, list[str]] = defaultdict(list)
+    dup_same: list[str] = []            # 内容一模一样, 丢掉无所谓
+    dup_diff: list[str] = []            # 同 id 不同内容 —— 丢掉就是丢数据
     bad: list[str] = []
 
     for p in take:
@@ -121,10 +149,14 @@ def main() -> None:
                     continue
                 iid = d["image_id"]
                 if iid in seen:
-                    dup[iid].append(f"{p.name}")
+                    op, oi, od = seen[iid]
+                    diff = _differs(od, d)
+                    line = (f"{iid}\n      {op.name}:{oi}  与  {p.name}:{i}"
+                            + (f"\n      差异: {diff}" if diff else ""))
+                    (dup_diff if diff else dup_same).append(line)
                     n_dup += 1
                     continue
-                seen[iid] = p
+                seen[iid] = (p, i, d)
                 by_ds[d.get("source_dataset", "unknown")] += 1
                 rows.append(json.dumps(d, ensure_ascii=False))
                 n_ok += 1
@@ -136,10 +168,23 @@ def main() -> None:
             print(f"    {b}")
         if len(bad) > 10:
             print(f"    … 还有 {len(bad) - 10} 行")
-    if dup:
-        print(f"\n⚠ {len(dup)} 个 image_id 重复(只留了第一次出现的):")
-        for iid, where in list(dup.items())[:5]:
-            print(f"    {iid}  又出现在 {', '.join(where[:3])}")
+    if dup_same:
+        print(f"\n  {len(dup_same)} 个 image_id 重复但内容完全相同, 已去重(无影响)")
+    if dup_diff:
+        # 这一类不能当成普通去重。同一个 id 指向两条不同的记录, 说明某个适配器
+        # 的 id 生成规则撞车了 —— 丢掉的那条是实实在在的数据, 而且丢哪条取决于
+        # 文件顺序, 下次重跑结果还会变。
+        print(f"\n✗ {len(dup_diff)} 个 image_id 重复**且内容不同** —— 这是丢数据, 不是去重:")
+        for line in dup_diff[:5]:
+            print(f"    {line}")
+        if len(dup_diff) > 5:
+            print(f"    … 还有 {len(dup_diff) - 5} 组")
+        print("\n  同一个 image_id 指向两条不同的记录, 说明生成 id 的适配器撞车了。")
+        print("  下游全靠 image_id 关联(golden set 排除、QC 分组、配额去重),")
+        print("  留着会错得很隐蔽; 而丢哪一条取决于文件顺序, 重跑结果还会变。")
+        print("  先去修适配器的 id 规则, 别用 --allow-dup 绕过去。")
+        if not args.allow_dup:
+            raise SystemExit(1)
 
     print(f"\n共 {len(rows)} 个 scene / {len(by_ds)} 个数据源")
     for ds, n in by_ds.most_common():
