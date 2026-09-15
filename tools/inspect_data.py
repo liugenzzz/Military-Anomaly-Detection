@@ -119,6 +119,9 @@ def main() -> None:
               "加上它才能知道图里到底长什么样)")
         return
 
+    if not args.endpoints and Path("configs/generate.yaml").exists():
+        args.endpoints = "configs/generate.yaml"       # 与 ping 一致, 免得忘了传
+        print(f"  端点池: {args.endpoints}")
     from llm_qa import DEFAULT_MODEL, LLM, image_message
     from concurrent.futures import ThreadPoolExecutor
 

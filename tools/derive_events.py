@@ -85,6 +85,22 @@ def derive_density_cluster(scene: Scene, rule: dict[str, Any], cls_id: str,
     if len(objs) < rule["min_cluster_size"]:
         return []
 
+    # 交通否决: 同框有成规模的车辆/摩托 -> 这是城市街景的人流, 不是聚集
+    veto_cls = {c.lower() for c in rule.get("traffic_veto_classes", [])}
+    if veto_cls:
+        n_traffic = sum(1 for o in scene.objects if o.cls.lower() in veto_cls)
+        if n_traffic >= int(rule.get("traffic_veto_count", 5)):
+            scene.meta["hard_negative"] = True
+            scene.meta.setdefault("hard_negative_reason", []).append(
+                f"{cls_id}/{subtype or '-'}: {len(objs)} 人聚集, 但同框有 {n_traffic} 个"
+                f"车辆/摩托等交通目标, 属于城市街景的人流")
+            cs = [o.center for o in objs]
+            if cs:
+                scene.meta.setdefault("hard_negative_bbox",
+                                      [min(c[0] for c in cs), min(c[1] for c in cs),
+                                       max(c[0] for c in cs), max(c[1] for c in cs)])
+            return []
+
     require = {c.lower() for c in rule.get("require_any", [])}
     on_fail = rule.get("on_require_fail")
     eps = cluster_eps(objs, scene.diag, rule)

@@ -233,7 +233,17 @@ def load_endpoints(path: str | None, role: str, model: str,
             if out:
                 return out
     raw = (base_url or os.environ.get("VLM_BASE_URL")
-           or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1")
+           or os.environ.get("OPENAI_BASE_URL"))
+    if not raw:
+        # **不要静默回落到 api.openai.com**。这个坑咬过两次: 配置读不到时
+        # 悄悄去连外网, 跑完一整轮才在报告里看到满屏 SSL 失败, 而真正的原因
+        # (配置没被读到)完全没暴露出来。宁可当场报错。
+        raise SystemExit(
+            "没有可用的推理端点。\n"
+            "  - 用配置文件:  --endpoints configs/generate.yaml\n"
+            "  - 或单地址:    --base-url http://10.107.226.27:8001/v1\n"
+            "  - 或环境变量:  VLM_BASE_URL=...\n"
+            "先跑 `python tools/llm_qa.py ping` 确认每一路通不通。")
     key = os.environ.get("VLM_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
     return [Endpoint(url=u, model=model, key=key) for u in raw.split(",") if u.strip()]
 

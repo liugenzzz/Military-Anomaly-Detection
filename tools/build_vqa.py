@@ -47,7 +47,9 @@ CROSS_NEG_RATIO = 0.35          # "有线但没人越线"的负样本。不给�
 # 不可数的"东西": 烟和火是连续的一团, 没有"几个"可言。
 # "清点一下画面中的烟雾"、"共 2 个目标: 火焰 1 个; 烟雾 1 个" —— 这种问法本身就不成立,
 # 标注里的一个框只是标出了它的范围, 不代表"一个烟雾"。这类目标改问覆盖范围。
-UNCOUNTABLE = {"fire", "smoke", "flame", "dust"}
+# 烟是连续的一团, 数不出"几个"; 但**火是可数的** —— 实测 FASDD 一张图标了
+# 5 个、9 个独立火点, 那是真的可以逐个数的。把 fire 一起归进不可数是我想当然了。
+UNCOUNTABLE = {"smoke", "dust", "haze"}
 
 MEASURE = {"military-plane": "架", "civil-plane": "架", "plane": "架",
            "military-helicopter": "架", "civil-helicopter": "架", "helicopter": "架",

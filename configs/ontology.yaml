@@ -46,6 +46,14 @@ classes:
         rule:
           kind: density_cluster
           target_classes: ["person", "pedestrian", "people", "soldier", "head"]
+          # 城市街景里的人不算集结。VisDrone 的图里动辄一百多个 person, 但同框
+          # 还有几十辆车和摩托 —— 那是逛街的人流, 不是聚集。实测抽样中 123 人 + 8 车、
+          # 42 人 + 6 摩托 都被判成了"人员聚集", 属于错标。
+          # 判据: 同框的车辆类目标超过 traffic_veto_count 就否决, 并转为困难负样本 ——
+          # "街上很多人但不是集结"恰恰是最该有的那类负样本。
+          traffic_veto_classes: ["vehicle", "car", "motorcycle", "motor", "bicycle",
+                                 "bus", "van", "truck", "large-vehicle"]
+          traffic_veto_count: 5
           min_cluster_size: 20
           eps_ratio: 0.04
           eps_obj_mult: 3.0        # 邻域半径下限 = 3 倍目标尺寸, 使判定不随裁剪尺寸漂移
