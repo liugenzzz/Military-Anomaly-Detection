@@ -649,7 +649,11 @@ def cmd_verify(args, onto):
     硬过滤放在 review 之前: 它是纯字符串检查, 零成本, 先把跑题的滤掉,
     再花算力做 review。
     """
-    system = (Path(args.prompt_dir) / "system.txt").read_text(encoding="utf-8").strip()
+    sysdir = Path(args.prompt_dir) / "system"
+    systems = ([f.read_text(encoding="utf-8").strip() for f in sorted(sysdir.glob("*.txt"))]
+               if sysdir.is_dir() else
+               [(Path(args.prompt_dir) / "system.txt").read_text(encoding="utf-8").strip()])
+    sys_rng = random.Random(0)      # 同上: 不让模型把一段长 system 背成常量
     review_tmpl = load_prompt("review.txt", args.prompt_dir + "/_tools")
     records = [json.loads(ln) for ln in
                Path(args.generated).read_text(encoding="utf-8").splitlines() if ln.strip()]
@@ -743,7 +747,7 @@ def cmd_verify(args, onto):
                                                        r["region"]["label"])
         out.append(make_row(
             sample_id=f"{r['image_id']}_{r['facet']}_{i}",
-            media_field=field, media=paths, system=system,
+            media_field=field, media=paths, system=sys_rng.choice(systems),
             turns=[(r["question"], answer)],
             metadata={"image_id": r["image_id"], "task_type": r["kind"], "facet": r["facet"],
                       "gen": "llm",

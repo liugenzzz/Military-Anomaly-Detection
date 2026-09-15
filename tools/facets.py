@@ -30,6 +30,21 @@ PROMPT_DIR = Path("configs/prompts")
 
 # 跨类互斥词: 写某一类异常的描述时, 不该出现另一类的专有词汇。
 # 防止四类描述串味 —— 参考项目没有这一条, 是本项目按 4 类异常的特点补的。
+# 全局禁用: 因果与推断连接词。**对所有描述侧面生效**。
+#
+# 这一条是被自己坑出来的: 我曾在 smoke/color 的 answer-spec 里写"可以补一句
+# 该颜色通常对应什么燃烧物", 于是模型老老实实写出"色调偏冷, 通常对应植被类
+# 物质的燃烧" —— 而 system.txt 第 4 条明明写着"不推测事件起因"。
+# 数据和 system 自相矛盾, 训完的结果是模型学会用 system 的口吻自信地编。
+#
+# 这些词出现在描述里, 几乎必然意味着答案越过了标注能支撑的边界。
+# 允许的例外只有 evidence/reason 两个侧面 —— 它们的任务本来就是给依据,
+# 但依据必须来自 FACTS 字段, 由 review 的 grounded 一维把关。
+INFERENCE_BAN = ["通常对应", "意味着", "说明存在", "由此可见", "可以推断",
+                 "推断出", "反映出", "表明该", "燃烧物", "燃料", "风向", "风力",
+                 "气流", "意图", "企图", "目的是"]
+INFERENCE_EXEMPT = {"evidence", "reason", "hard_neg"}
+
 CROSS_CLASS_BAN: dict[str, list[str]] = {
     "massing": ["烟雾", "烟柱", "火光", "火焰", "爆炸", "爆燃", "越界", "禁区"],
     "explosion": ["集结", "列队", "阵列", "越界", "禁区", "编队"],
@@ -58,8 +73,9 @@ class Facet:
         return self.a_by_anomaly.get(anomaly, self.a_example)
 
     def bans_for(self, anomaly: str) -> list[str]:
-        """该侧面用在某个异常类上时的完整禁用词 = 自身 must-not + 跨类互斥。"""
-        return list(dict.fromkeys(self.must_not + CROSS_CLASS_BAN.get(anomaly, [])))
+        """完整禁用词 = 自身 must-not + 跨类互斥 + 全局推断词。"""
+        extra = [] if self.kind in INFERENCE_EXEMPT else INFERENCE_BAN
+        return list(dict.fromkeys(self.must_not + CROSS_CLASS_BAN.get(anomaly, []) + extra))
 
     def violates(self, text: str, anomaly: str) -> list[str]:
         return [w for w in self.bans_for(anomaly) if w and w in text]

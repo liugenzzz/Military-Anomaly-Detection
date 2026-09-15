@@ -195,7 +195,16 @@ class RuleBuilder:
         self.enabled = [c["id"] for c in onto["classes"]
                         if c["id"] != "normal" and c.get("enabled", True)]
         _, self.asks = load_all(prompt_dir)
-        self.system = (Path(prompt_dir) / "system.txt").read_text(encoding="utf-8").strip()
+        # system 变体。全量样本挂同一段长 system, 全参 SFT 下模型会把它当常量背下来,
+        # 换个 prompt 就掉性能。给 5 个语义等价的写法 + 一个极简 + 一个空,
+        # 让模型学的是"做这件事", 不是"背这段话"。
+        sysdir = Path(prompt_dir) / "system"
+        if sysdir.is_dir():
+            self.systems = [f.read_text(encoding="utf-8").strip()
+                            for f in sorted(sysdir.glob("*.txt"))]
+        else:
+            self.systems = [(Path(prompt_dir) / "system.txt").read_text(encoding="utf-8").strip()]
+        self.system = self.systems[0]
         self.rng = random.Random(seed)
         self._n = 0
 
@@ -230,7 +239,8 @@ class RuleBuilder:
         self._n += 1
         return make_row(
             sample_id=f"{s.image_id}_{task}_{self._n}",
-            media_field=field, media=paths, system=self.system, turns=turns,
+            media_field=field, media=paths,
+            system=self.rng.choice(self.systems), turns=turns,
             metadata={"image_id": s.image_id, "task_type": task, "gen": "rule",
                       "modality": s.modality, "n_media": len(paths),
                       "anomaly": s.anomaly_types or ["normal"],
@@ -251,7 +261,7 @@ class RuleBuilder:
                 main = max(((o.cls, sum(1 for x in s.objects if x.cls == o.cls))
                             for o in s.objects), key=lambda kv: kv[1], default=None)
                 if main:
-                    cls_hint = f"{n}{MEASURE.get(main[0], '个')}{CLS_ZH.get(main[0], main[0])}"
+                    cls_hint = self.count_phrase(s, main[0], n)
             # 放宽档补出来的事件措辞要留余地: 它本来就是够不上严格阈值才被捡回来的,
             # 用"判定为集结"这种确定语气去训, 等于教模型把小规模聚集当成集结
             if s.events and all(e.evidence.get("relaxed") for e in s.events):
@@ -278,7 +288,7 @@ class RuleBuilder:
             for o in s.objects:
                 by[o.cls] = by.get(o.cls, 0) + 1
             cls, n = max(by.items(), key=lambda kv: kv[1]) if by else ("目标", 0)
-            what = f"{n}{MEASURE.get(cls, '个')}{CLS_ZH.get(cls, cls)}" if n else "若干目标"
+            what = self.count_phrase(s, cls, n) if n else "若干目标"
             a = (f"未见异常。画面中虽有 {what} 密集成簇、达到了集结的规模条件，"
                  f"但均为民用目标，未见坦克、装甲车或军机等军事装备，属于正常场景。")
         else:
@@ -328,6 +338,64 @@ class RuleBuilder:
         q = self._ask("locate_box", zh="越界目标")
         return q, boxes_json([(to_bbox2d(o.bbox, s.width, s.height), "越界目标") for o in objs])
 
+    # 精确计数的闸。GT 来自高分辨原图和多帧跟踪, 人对着单帧数不出 26 个人头 ——
+    # 拿它当单帧答案, 模型学到的是"猜一个像样的数", 这正是遥感 VLM 幻觉的主要来源。
+    #
+    # **两种数不清要分开**: 太多和太小, 说法完全不同。
+    #   太多  -> 给量级("二三十辆"), 说明是密到点不清;
+    #   太小  -> 干脆不出计数题。硬答"目测 3 辆上下, 目标很密"既自相矛盾又没意义。
+    COUNT_EXACT_MAX = 15        # 超过这个数, 人看图也只能估
+    COUNT_FEW = 6               # 这么少, 哪怕目标偏小也数得过来
+    COUNT_MIN_AREA = 0.0008     # 想报准数, 中位目标至少占画幅万分之八
+    AREA_FLOOR = 0.0002         # 低于这个, 连"看得见"都谈不上, 什么计数题都别出
+
+    def _med_area(self, s: Scene, cls: str) -> float:
+        objs = [o for o in s.objects if o.cls == cls]
+        if not objs or not s.width or not s.height:
+            return 0.0
+        return sorted(o.area for o in objs)[len(objs) // 2] / (s.width * s.height)
+
+    def _count_mode(self, s: Scene, cls: str, n: int) -> str:
+        """exact = 给准数 / magnitude = 给量级 / none = 这题不出"""
+        a = self._med_area(s, cls)
+        if a < self.AREA_FLOOR:
+            return "none"
+        if n <= self.COUNT_FEW:
+            return "exact"
+        if n <= self.COUNT_EXACT_MAX and a >= self.COUNT_MIN_AREA:
+            return "exact"
+        if n > self.COUNT_EXACT_MAX:
+            return "magnitude"
+        return "none"                       # 不多不少但看不清 —— 不出
+
+    def _countable_exact(self, s: Scene, cls: str, n: int) -> bool:
+        return self._count_mode(s, cls, n) == "exact"
+
+    def count_phrase(self, s: Scene, cls: str, n: int) -> str:
+        """把数量写进句子时**一律走这里**。
+
+        否则会漏: 计数题已经改口说"二三十名"了, 紧接着的判定句却又写
+        "涉及 26 名人员" —— 同一条对话里前脚说数不清、后脚报准数。
+        """
+        mw, zh = MEASURE.get(cls, "个"), CLS_ZH.get(cls, cls)
+        mode = self._count_mode(s, cls, n)
+        if mode == "exact":
+            return f"{n}{mw}{zh}"
+        if mode == "magnitude":
+            return f"{self._magnitude(n, mw)}{zh}"
+        return f"若干{zh}"
+
+    @staticmethod
+    def _magnitude(n: int, mw: str) -> str:
+        """数不清时的量级说法。**不给区间中值**, 免得又变成一个假精确的数。"""
+        if n <= 30:
+            return f"二三十{mw}"
+        if n <= 60:
+            return f"数十{mw}"
+        if n <= 150:
+            return f"上百{mw}"
+        return f"数百{mw}以上"
+
     def count(self, s: Scene) -> tuple[str, str] | None:
         by: dict[str, int] = {}
         for o in s.objects:
@@ -337,9 +405,14 @@ class RuleBuilder:
         if not by:
             return None
         cls, n = max(by.items(), key=lambda kv: kv[1])
-        mw = MEASURE.get(cls, "个")
-        q = self._ask("count", mw=mw, label=CLS_ZH.get(cls, cls))
-        return q, f"{n}{mw}。"
+        mw, zh = MEASURE.get(cls, "个"), CLS_ZH.get(cls, cls)
+        mode = self._count_mode(s, cls, n)
+        if mode == "exact":
+            return self._ask("count", mw=mw, label=zh), f"{n}{mw}。"
+        if mode == "magnitude":
+            return (self._ask("scale_ask", label=zh),
+                    f"{self._magnitude(n, mw)}，密集成片，无法逐个点清。")
+        return None                         # 目标太小, 这题不成立
 
     def negation(self, s: Scene) -> tuple[str, str] | None:
         """否定变体。**只问本数据集里真实存在、这张图上恰好没有的异常类型** ——
@@ -439,7 +512,7 @@ class RuleBuilder:
             claim = f"画面中有 {n} {mw}{zh}"
             return self._ask("correct", claim=claim), f"说法属实，画面中确为 {n} {mw}{zh}。"
         style = self.rng.random()
-        if style < 0.5:                                   # 数量错
+        if style < 0.5 and self._countable_exact(s, cls, n):   # 数量错(数得清才出)
             delta = self.rng.choice([-3, -2, -1, 1, 2, 3, 5])
             wrong = max(0, n + delta)
             if wrong == n:
@@ -473,7 +546,7 @@ class RuleBuilder:
         if not cc:
             return None
         cls, n = cc[0]
-        if n > 12 or cls in UNCOUNTABLE:
+        if n > 12 or cls in UNCOUNTABLE or not self._countable_exact(s, cls, n):
             return None
         objs = [o for o in s.objects if o.cls == cls]
         mw, zh = MEASURE.get(cls, "个"), CLS_ZH.get(cls, cls)
@@ -554,7 +627,7 @@ class RuleBuilder:
         for o in s.objects:
             by[o.cls] = by.get(o.cls, 0) + 1
         cls, n = max(by.items(), key=lambda kv: kv[1]) if by else ("目标", 0)
-        what = f"{n}{MEASURE.get(cls, '个')}{CLS_ZH.get(cls, cls)}" if n else "若干目标"
+        what = self.count_phrase(s, cls, n) if n else "若干目标"
         return (self._ask("dense_region"),
                 f"{where}该区域聚集了 {what}，密度明显高于画面其他部分，"
                 f"但均为民用目标，不属于需要上报的情况。")
