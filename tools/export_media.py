@@ -51,7 +51,7 @@ def _link(src: Path, dst: Path, mode: str) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="归集媒体文件到语料库目录并改写路径")
-    ap.add_argument("--vqa-dir", nargs="+", required=True, help="含 train/val/test.json 的目录")
+    ap.add_argument("--in", "--vqa-dir", dest="vqa_dir", nargs="+", required=True, help="含 train/val/test.json 的目录")
     ap.add_argument("--media-root", required=True,
                     help="语料库根目录, 例如 /mnt/.../data_process/corpus_media")
     ap.add_argument("--name", default="military_anomaly", help="本数据集在语料库下的目录名")

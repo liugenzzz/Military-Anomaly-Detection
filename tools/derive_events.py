@@ -18,7 +18,7 @@ from typing import Any
 
 import yaml
 
-from scene import Event, Scene, dump_scenes, load_scenes
+from scene import Event, Obj, Scene, dump_scenes, load_scenes
 
 
 # ---------------------------------------------------------------- 聚类

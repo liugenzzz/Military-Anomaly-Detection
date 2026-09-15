@@ -26,7 +26,7 @@ import argparse
 import json
 import re
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -72,9 +72,20 @@ def subject_of(*texts: str) -> str | None:
             if w in t:
                 return SUBJECT_ALIAS.get(w, w)
     return None
-# 断言异常的措辞。正常图/难负样本里出现即为自相矛盾
-ASSERT_ANOMALY_RE = re.compile(r'(有异常|存在异常|发现异常|属于异常|异常聚集|正在聚集|发生爆炸|出现烟雾|车队|灾害|越界)')
-DENY_ANOMALY_RE = re.compile(r'(无异常|没有异常|未见异常|不构成异常|未发现)')
+# 断言异常的措辞。正常图/难负样本里出现即为自相矛盾。
+# **必须按句子判, 并且看否定词。** 光匹配一个"车队"会把
+# 「否，未观察到车队机动的迹象。」也判成断言 —— 那恰恰是正确答案。
+ASSERT_ANOMALY_RE = re.compile(r'(有异常|存在异常|发现异常|属于异常|异常聚集|正在聚集|'
+                               r'发生爆炸|出现烟雾|车队|灾害|越界)')
+# **否定词要就近看, 不能按整句找。** 规则侧的标准否定答案长这样:
+#   「逐项核查：无军事装备集结、无人员异常聚集、无烟火、无车队机动」
+# 每个否定词只管紧跟它的那一项, 按整句搜"没有/未见"根本抓不到这个「无」。
+# 窗口取 6 个字: 够放下"并未观察到"这种长否定, 又不会跨到上一个顿号之外。
+NEG_NEAR_RE = re.compile(r'[无未没不非否][^，,、。；;]{0,5}$')
+# 这些词里的「不 / 无」是连词或副词, 不是否定。漏掉它们会把
+# 「未见异常。**不过**右上角出现烟雾。」判成没问题 —— 而那正是该抓的自相矛盾。
+NOT_NEG_RE = re.compile(r'不过|不但|不仅|不只|不管|不论|无论|无非|不外乎|不由得')
+SENT_SPLIT_RE = re.compile(r'[。；;!?\n]+')
 # 中文 label 里混进 ASCII 标识符 —— 本体 id 没翻译就落盘了
 RAW_ID_RE = re.compile(r'[a-z][a-z0-9]*_[a-z0-9_]+')
 
@@ -193,12 +204,19 @@ def check(rows: list[dict[str, Any]], scale_default: int,
                 break                      # 一条报一次就够, 不刷屏
 
         # --- 3) 正常图 / 难负样本却在断言异常 ---
-        if not anomalies or hard_neg:
-            m = ASSERT_ANOMALY_RE.search(ans)
-            if m and not DENY_ANOMALY_RE.search(ans):
+        if (not anomalies or anomalies == ["normal"]) or hard_neg:
+            # 逐个词看: 词前面没有否定词才算断言。
+            hit = None
+            for m in ASSERT_ANOMALY_RE.finditer(ans):
+                ctxb = NOT_NEG_RE.sub("＊", ans[max(0, m.start() - 6):m.start()])
+                if not NEG_NEAR_RE.search(ctxb):
+                    hit = m
+                    break
+            if hit:
                 tag = "难负样本" if hard_neg else "无异常标注"
+                ctx = ans[max(0, hit.start() - 12):hit.end() + 8].replace("\n", " ")
                 out.append(Finding("normal_but_asserts_anomaly", sid,
-                                   f"{tag}, 答案里却出现「{m.group(1)}」"))
+                                   f"{tag}, 却断言「{hit.group(1)}」: …{ctx}…"))
 
         # --- 4) label 里漏出本体 id ---
         for lab in LABEL_RE.findall(ans):

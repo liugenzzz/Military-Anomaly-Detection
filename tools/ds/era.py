@@ -23,7 +23,7 @@ import json
 import re
 from pathlib import Path
 
-from ds.common import VID_EXT, extract_frames, image_size, iter_images, iter_videos
+from ds.common import VID_EXT, extract_frames, image_size
 from scene import Event, Scene
 
 DATASET = "ERA"

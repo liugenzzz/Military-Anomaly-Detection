@@ -231,7 +231,7 @@ def main() -> None:
     if args.inline_images:
         import llm_qa
         try:
-            import PIL  # noqa: F401
+            import PIL  # noqa: F401  只为探测是否装了 Pillow
         except ImportError:
             if llm_qa.MAX_IMAGE_SIDE:
                 print(f"  ⚠ 没装 Pillow, max_image_side={llm_qa.MAX_IMAGE_SIDE} 不生效, "

@@ -75,6 +75,24 @@ CLEAN = [
     # 正常图说"未见异常", 措辞里出现"异常"二字不该被当成断言
     row("n_norm", "N_4", [("有问题吗？", "未见异常，目标分布稀疏。")],
         anomaly=[], task_type="judge"),
+    # 否定词就贴在词前面 —— 规则侧标准否定答案就长这样, 按整句搜否定词抓不到
+    row("n_neg1", "N_5", [("有车队吗？", "否，未观察到车队机动的迹象。")],
+        anomaly=[], task_type="negation"),
+    row("n_neg2", "N_6", [("有问题吗？",
+                           "未见异常。逐项核查：无军事装备集结、无人员异常聚集、"
+                           "无烟火、无车队机动。")], anomaly=[], task_type="judge"),
+    row("n_neg3", "N_7", [("有问题吗？",
+                           "未见异常。目标分布稀疏，无烟火迹象，也没有成队行进的车辆。")],
+        anomaly=[], task_type="judge"),
+]
+
+# 这些**必须报** —— 都曾被否定词逻辑误放过去
+DIRTY = [
+    # 转折连词里的"不"不是否定词: 「不过…出现烟雾」是真的自相矛盾
+    row("d_but", "D_1", [("有问题吗？", "未见异常。不过右上角出现烟雾。")],
+        anomaly=[], task_type="judge"),
+    row("d_plain", "D_2", [("有问题吗？", "画面中存在人员异常聚集，规模约三十人。")],
+        anomaly=[], task_type="judge"),
 ]
 
 EXPECTED = {
@@ -85,11 +103,14 @@ EXPECTED = {
 }
 
 if __name__ == "__main__":
-    import tempfile, os
+    import os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
     from qc_consistency import check
     got = {f.kind for f in check(rows, 1000, 3, 12)}
     noise = check(CLEAN, 1000, 3, 12)
+    missed = [r["id"] for r in DIRTY
+              if r["id"] not in {f.sample_id for f in check([r], 1000, 3, 12)
+                                 if f.kind == "normal_but_asserts_anomaly"}]
     missing, extra = EXPECTED - got, got - EXPECTED
     for k in sorted(EXPECTED | got):
         print(f"  {'✓' if k in got else '✗'} {k}")
@@ -99,10 +120,13 @@ if __name__ == "__main__":
     if extra:
         print(f"\n多报了 {sorted(extra)}(对照样本里本来没有这类问题, 大概率是误报)")
         raise SystemExit(1)
+    if missed:
+        print(f"\n这些自相矛盾没被抓出来: {missed}")
+        raise SystemExit(1)
     if noise:
         print(f"\n反例里报出了 {len(noise)} 条告警, 全是误报:")
         for f in noise:
             print(f"    {f.kind} / {f.sample_id}: {f.detail}")
         raise SystemExit(1)
     print(f"\n{len(rows)} 条对照样本, {len(EXPECTED)} 类检查全部命中; "
-          f"{len(CLEAN)} 条反例零告警。")
+          f"{len(CLEAN)} 条反例零告警; {len(DIRTY)} 条该报的都报了。")

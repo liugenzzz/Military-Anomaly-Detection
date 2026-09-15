@@ -15,7 +15,7 @@ from pathlib import Path
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="每种题型抽一条样例")
-    ap.add_argument("--vqa-dir", nargs="+", required=True)
+    ap.add_argument("--in", "--vqa-dir", dest="vqa_dir", nargs="+", required=True)
     ap.add_argument("--out", default="examples.jsonl")
     ap.add_argument("--per-kind", type=int, default=1, help="每种抽几条")
     ap.add_argument("--seed", type=int, default=0)

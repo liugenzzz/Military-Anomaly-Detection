@@ -19,7 +19,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ds.boxes import BBOX_SCALE, COORD_MODE, box_json, boxes_json, to_bbox2d  # noqa: E402
 from derive_events import _side  # noqa: E402  越界方向判定, 与派生端共用一份实现
-from facets import load_all, load_tool  # noqa: E402
+from facets import load_all  # noqa: E402
 from config import CFG  # noqa: E402
 from sharegpt import make_row, meta_of  # noqa: E402
 from scene import Obj, Scene, load_scenes  # noqa: E402

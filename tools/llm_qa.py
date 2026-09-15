@@ -20,7 +20,6 @@ import base64
 import hashlib
 import io
 import json
-import os
 import random
 import re
 import sys
@@ -37,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ds.boxes import BBOX_SCALE, COORD_MODE, box_json, to_bbox2d  # noqa: E402
 from build_vqa import region_box_of, scene_quality  # noqa: E402  与规则侧共用一套口径
 from sharegpt import make_row  # noqa: E402
-from facets import Facet, load_all, load_tool
+from facets import Facet, load_all
 from scene import Scene, load_scenes
 
 # 描述侧面的抽取权重。**position 不在其中** —— 方位表述由 build_vqa 的

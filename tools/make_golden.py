@@ -23,6 +23,7 @@ import yaml
 
 from build_vqa import RuleBuilder
 from scene import Scene, dump_scenes, load_scenes
+from sharegpt import meta_of
 
 # 这些数据集自带人工精标, L2 直接从中借用, 无需自己标注
 HUMAN_ANNOTATED = {"CapERA", "ERA", "HIVAU-70k", "UCA", "UCF-Crime-UCA", "MOCO"}
@@ -98,12 +99,12 @@ def main() -> None:
     (out / "exclude_ids.txt").write_text("\n".join(exclude) + "\n", encoding="utf-8")
     dump_scenes(l1 + l2, out / "golden_scenes.jsonl")
 
-    hist = Counter(s["extra"]["task"] for s in samples)
-    by_src = Counter(s["extra"]["source_dataset"] for s in samples)
+    hist = Counter(meta_of(s).get("task_type", "?") for s in samples)
+    by_src = Counter(meta_of(s)["source_dataset"] for s in samples)
     print(f"golden set: {len(samples)} 条 QA / {len(exclude)} 张图")
-    print(f"  L1 自动可验证(计数+grounding, 零人工): {sum(1 for s in samples if s['extra']['golden_level'] == 'L1')}")
+    print(f"  L1 自动可验证(计数+grounding, 零人工): {sum(1 for s in samples if meta_of(s)['golden_level'] == 'L1')}")
     print(f"  L2 借用人工精标({', '.join(sorted(l2_names & {x.source_dataset for x in scenes})) or '本批无'}): "
-          f"{sum(1 for s in samples if s['extra']['golden_level'] == 'L2')}")
+          f"{sum(1 for s in samples if meta_of(s)['golden_level'] == 'L2')}")
     print("\n题型:", dict(hist))
     print("来源:", dict(by_src))
     print(f"\n已写出 {out / 'exclude_ids.txt'}")

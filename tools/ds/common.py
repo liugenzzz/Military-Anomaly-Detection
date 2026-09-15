@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 
-import json
 import math
 import os
 import shutil
@@ -71,7 +70,7 @@ def video_duration(path: str | Path) -> float | None:
         except Exception:
             pass
     try:
-        import cv2
+        import cv2  # noqa: F401  只为探测是否装了 OpenCV
         cap = cv2.VideoCapture(str(path))
         fps = cap.get(cv2.CAP_PROP_FPS) or 0
         n = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0

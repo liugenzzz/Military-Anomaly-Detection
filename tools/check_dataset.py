@@ -27,7 +27,7 @@ def main() -> None:
 
     problems: list[str] = []
     qa_types, anomalies, sources = Counter(), Counter(), Counter()
-    styles, turns = Counter(), Counter()
+    turns = Counter()
     facets, gens, imgs, mods = Counter(), Counter(), Counter(), Counter()
     cover = Counter()          # 训练要求的三件事各覆盖了多少条
     total = 0
