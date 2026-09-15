@@ -441,7 +441,13 @@ def image_message(text: str, image_path: str | None, inline: bool,
     max_side = MAX_IMAGE_SIDE if max_side is None else max_side
     quality = IMAGE_QUALITY if quality is None else quality
     p = Path(image_path)
-    if inline and p.exists():
+    if inline and not p.exists():
+        # **要内联却找不到文件, 就地报错。** 以前这里是 `if inline and p.exists()`,
+        # 文件不在就悄悄滑到下面的 file:// 分支, 服务端再回一个 400 或者干脆断连 ——
+        # 报出来是 "RemoteDisconnected", 谁也想不到真正的原因是路径写错了。
+        # 这个项目在路径上栽过不止一次(DOTA 标签、Mendeley 扫描), 必须说人话。
+        raise FileNotFoundError(f"图不存在, 无法内联: {image_path}")
+    if inline:
         small = _shrink(p, max_side, quality) if max_side else None
         if small:
             raw, mime = small
@@ -451,7 +457,10 @@ def image_message(text: str, image_path: str | None, inline: bool,
         b64 = base64.b64encode(raw).decode()
         url = f"data:{mime};base64,{b64}"
     else:
-        url = str(p)
+        # 非内联模式发的是 file:// URL。**vLLM 默认不认** —— 起服务时必须带
+        # --allowed-local-media-path, 而且推理机得能看到同一个路径。
+        # 以前这里发的是裸路径(连 scheme 都没有), 那是必然失败的写法。
+        url = p.as_uri() if p.is_absolute() else f"file://{p.resolve()}"
     # 文字在前、图在后。Qwen 的 chat template 对两种顺序都能渲染, 但参考项目
     # (book_cpt/services/clients.py)跑通的是这个顺序, 保持一致省得踩模板差异。
     return [{"type": "text", "text": text},

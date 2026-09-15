@@ -8,9 +8,15 @@ B 是关键。设计问题之前得先知道图里到底有什么: 是俯拍机�
 目标占几个像素还是占半幅画? 烟是一柱还是漫天? 不看图就设计问法, 就会写出
 "清点一下画面中的烟雾"这种问法 —— 标注里 smoke 有个框, 于是想当然地去数它。
 
-    python tools/inspect_data.py --scenes data/all_ev.jsonl --out-dir data/inspect
+先跑 ping 确认端点通, 再跑这个:
+
+    python tools/llm_qa.py ping
     python tools/inspect_data.py --scenes data/all_ev.jsonl --out-dir data/inspect \
-        --endpoints configs/endpoints.local.yaml --per-class 12
+        --per-class 12
+
+--endpoints 不写就默认读 configs/generate.yaml, 与 ping 用同一份配置。
+图像默认 base64 内联; 只有在推理机挂了同一块盘、且 vLLM 起服务时带了
+--allowed-local-media-path 的情况下, 才用 --no-inline-images 省带宽。
 """
 from __future__ import annotations
 
@@ -102,7 +108,13 @@ def main() -> None:
     ap.add_argument("--base-url", default=None)
     ap.add_argument("--model", default=None)
     ap.add_argument("--workers", type=int, default=0)
-    ap.add_argument("--inline-images", action="store_true")
+    # **默认内联**。不内联就得靠 file:// 让推理机自己去读盘, 要求 vLLM 起服务时
+    # 带 --allowed-local-media-path 且挂了同一块盘 —— 条件不满足时每一张都失败。
+    # base64 虽然多传点字节, 但它总是能用。先能跑通, 再谈省带宽。
+    ap.add_argument("--inline-images", dest="inline_images",
+                    action="store_true", default=None)
+    ap.add_argument("--no-inline-images", dest="inline_images", action="store_false",
+                    help="改用 file:// 让推理机自己读盘(需要 --allowed-local-media-path)")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -134,12 +146,32 @@ def main() -> None:
         p = pool[:]
         rng.shuffle(p)
         picked += p[:args.per_class]
+    # 先查一遍文件在不在。模型调用是贵的, 路径检查是免费的 —— 拿几十次
+    # 失败的推理去发现"图根本不在盘上", 是这个项目已经栽过的坑。
+    missing = [s for s in picked if not Path(s.image_path).exists()]
+    if missing:
+        print(f"\n⚠ {len(missing)}/{len(picked)} 张抽中的图在盘上找不到, 已剔除:")
+        for s in missing[:5]:
+            print(f"    {s.image_id}: {s.image_path}")
+        if len(missing) > 5:
+            print(f"    … 还有 {len(missing) - 5} 张")
+        picked = [s for s in picked if Path(s.image_path).exists()]
+    if not picked:
+        raise SystemExit("抽中的图一张都不在盘上, 先确认 scenes 里的 image_path "
+                         "是相对哪个目录写的。")
     print(f"\n抽 {len(picked)} 张图让模型自由描述 ({len(by_cls)} 个类)")
 
     llm = LLM(args.model or DEFAULT_MODEL, args.base_url,
               endpoints_file=args.endpoints, role="generate", temperature=0.2)
     print(f"  {llm.describe()}")
     workers = args.workers or llm.total_concurrency
+
+    if args.inline_images is None:              # 命令行没指定就读配置, 再没有就内联
+        import yaml
+        cfg = (yaml.safe_load(Path(args.endpoints).read_text(encoding="utf-8")) or {}
+               if args.endpoints else {})
+        args.inline_images = bool((cfg.get("llm") or {}).get("inline_images", True))
+    print(f"  图像传法: {'base64 内联' if args.inline_images else 'file:// 由推理机读盘'}")
 
     def run(s: Scene):
         msg = [{"role": "user",
@@ -154,8 +186,23 @@ def main() -> None:
                 "classes": dict(Counter(o.cls for o in s.objects).most_common(5)),
                 "model_sees": ans}
 
+    # **先拿一张真图试一次再开工。** 上一版是直接 60 张并发跑, 每条失败都被
+    # 吞成 "[调用失败]" 写进结果, 于是跑完才发现整份报告 100% 是错误信息 ——
+    # 既浪费了一轮, 又让一次全废的运行看起来像"有结果了"。
+    probe = run(picked[0])
+    if probe["model_sees"].startswith("[调用失败]"):
+        print(f"\n预检失败, 已中止 —— 不再把 {len(picked)} 条错误信息写成报告。")
+        print(f"  图: {picked[0].image_path}")
+        print(f"  {probe['model_sees']}")
+        print("\n先跑 `python tools/llm_qa.py ping` 确认端点; 如果 ping 全绿而这里"
+              "仍失败,\n  多半是图像传法不对: 默认 base64 内联, 若你显式加了"
+              " --no-inline-images,\n  推理机必须挂到同一块盘并带"
+              " --allowed-local-media-path。")
+        raise SystemExit(1)
+
     with ThreadPoolExecutor(workers) as ex:
-        res = list(ex.map(run, picked))
+        res = [probe] + list(ex.map(run, picked[1:]))
+    bad = [r for r in res if r["model_sees"].startswith("[调用失败]")]
     (out / "vlm_free_look.jsonl").write_text(
         "\n".join(json.dumps(r, ensure_ascii=False) for r in res) + "\n", encoding="utf-8")
 
@@ -168,6 +215,14 @@ def main() -> None:
             md.append(f"> {r['model_sees']}\n")
     (out / "vlm_free_look.md").write_text("\n".join(md), encoding="utf-8")
     print(f"-> {out / 'vlm_free_look.md'}  (这份是重点, 先读它再谈问法)")
+    if bad:
+        # 部分失败也要显眼地说出来。抽样报告里混着几条错误信息, 读的人很容易
+        # 当成"模型看不清这张图"的结论, 实际上是根本没调通。
+        print(f"\n⚠ {len(bad)}/{len(res)} 条调用失败, 这几条在报告里是错误信息不是描述:")
+        for r in bad[:3]:
+            print(f"    {r['image_id']}: {r['model_sees'][:110]}")
+        if len(bad) > 3:
+            print(f"    … 还有 {len(bad) - 3} 条")
 
 
 if __name__ == "__main__":
