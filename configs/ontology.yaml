@@ -1,253 +1,427 @@
-# 军事异常检测本体定义 v0.2
+# 军事异常本体 v1.0.0 —— 层次化多标签
 #
-# v0.2 变更(决策见 docs/08_task_types.md):
-#   - 从 10 类收敛到 4 类异常 + 正常, 每类目标 25,000 条 QA
-#   - 兵力集结与人员聚集合并为「异常聚集」, 保留 subtype 子标签
-#   - 装备集结新增 require_any 军事目标约束: 纯民用车辆密集聚集不算异常,
-#     而是标为 hard_negative 困难负样本(避免把停车场训成装甲集群)
-#   - 人员聚集不设军事身份要求: 航拍视角分辨不出军装, 该约束不可实现
-#   - 停用的类别保留在文件末尾(enabled: false), 便于日后一行恢复
-#   - v0.5.0: 停用越界移动(单帧不可判 + 虚拟边界靠文字注入, 是在教模型编);
-#     启用车队机动(补上间距均匀/车型一致/细长三条判据后才分得开车流);
-#     新增灾害现场(把原先被整个排除的 ERA 洪水/滑坡/震后/事故单列成类)。
-#   - v0.4.0: 每条规则加 relax 档。产量够的类别照严格阈值走(多的筛精),
-#     产量不够的类别才启用放宽档补量(少的放宽), 且补出来的事件带 relaxed
-#     标记, 下游答案措辞随之变软 —— 放宽的是召回, 不是结论的确定性。
-#   - v0.2.1: 军用/民用目标分开命名(military-plane vs civil-plane),
-#     民用机场机群与民用港口因此成为困难负样本而非误标为集结
+# 结构: 领域(domain) × 族(family) × 类型(二级, 训练标签) × 事件(三级, 仅 metadata)
+#
+#   domain   air 空中 / sea 水面 / land 地面
+#   family   activity 行为族 / indicator 征候族
+#   二级     **训练标签**, 模型要学会判的就是这些
+#   三级     只写进 metadata, **不作为独立训练类别** ——
+#            瓶颈是独立图数, 细分只会把同一批图切成更多更小的类, 每格都不够训。
+#            将来数据够了随时提升为训练类别, 信息不丢。
+#
+# **多标签**: 一张图可以同时挂多个类。语料里 explosion+smoke 共现 7819 次,
+# 硬做单标签本来就是错的。
+#
+# -----------------------------------------------------------------------------
+# 领域怎么判 —— 必须有明确规则, 否则标签噪声无穷
+# -----------------------------------------------------------------------------
+#   行为族: 按**行为主体所属的作战域**。停机坪上的军机仍属 air(它是空中力量),
+#           不因为停在地上就变成 land。
+#   征候族: 按**现象发生的位置**。舰上火情属 sea, 野外火情属 land。
+#   concentration 例外: 按**被聚集资产的类型**走 —— 机群密集属 air,
+#           舰船密集属 sea, 车辆/人群属 land。这样才和「密集了什么」对得上,
+#           也让 air / sea 两个域不至于全空。
+#
+# 电磁域不做(2026-09-16 定): 光学影像里看不见, 标注来源得是信号情报,
+# 与影像 VQA 是两个任务。涉及电磁的事件若在影像上有可见表现, 归到它表现出来的
+# 那个域, 「关闭应答机」写进 evidence 而不是单独一个域。
+#
+# -----------------------------------------------------------------------------
+# 为什么 id 没有跟着改名
+# -----------------------------------------------------------------------------
+# 草案里 explosion 叫 fire、fortification 叫 fortify。**没有改**: 这些 id 已经
+# 写进 tools/adapters.py 的 LABEL_MAP、tools/ds/era.py 的 ANOMALY、facets.py、
+# build_vqa.py, 以及已落盘的 all_ev.jsonl。为了一个内部字符串做全库改名, 属于
+# CLAUDE.md 里记过的「顺手的批量正则改」—— 收益是零, 风险是全库。
+# 分类学信息由 domain / family / parent 三个字段承载, 与 id 无关。
+#
+# -----------------------------------------------------------------------------
+# data 块 —— 这一版新增的关键: **家底登记**
+# -----------------------------------------------------------------------------
+#   status   ready 图数够 / thin 图数不足, 硬凑就是同质化 / empty 等数据源
+#   blocked_by  有数据但还开不了, 缺的是**代码**不是数据。与 empty 区分开:
+#               「没素材」和「没接线」是两种完全不同的待办。
+# 每个类的家底直接写在配置里, 就不会再像上一轮那样, 跑到一半才发现某一类是空的。
+#
+# **enabled 与 status 是两件事。** status 说数据够不够, enabled 说这一轮跑不跑。
+# =============================================================================
+version: "1.0.0"
+box_scale: 1000
+negative_ratio_target: 0.3
+qa_per_anomaly_target: 25000
 
-version: "0.5.6"
-box_scale: 1000                 # grounding 坐标归一化上限, Qwen-VL 系列用 1000
-negative_ratio_target: 0.30     # normal 样本占比下限
-qa_per_anomaly_target: 25000    # 每个异常类的 QA 条数目标
+# 每图出题数的健康区间。低于下限浪费素材, 高于上限边际收益迅速递减。
+# 用来核对「目标条数 ÷ 独立图数」是否落在区间内 —— 落不进去说明该补数据源,
+# 而不是硬出题。
+qa_per_image:
+  min: 3
+  max: 8
 
-# 各数据源的抽帧间隔。默认 30 对 DroneCrowd 与 VisDrone-MOT 太稀
-# (24960 帧只取 832), 按配额反推后下调; 近重复由 screen.py 的闸3 兜底。
 stride:
   DroneCrowd: 8
   VisDrone2019-MOT: 8
-  Drone-Anomaly: 10
+  ERA: 30
+
+taxonomy:
+  domains:
+    - {id: air,  zh: 空中, note: "固定翼/旋翼/无人机"}
+    - {id: sea,  zh: 水面, note: "水面舰艇/港口"}
+    - {id: land, zh: 地面, note: "装甲/车辆/人员/工事/设施"}
+  families:
+    - id: activity
+      zh: 行为族
+      note: >-
+        主体在**做什么**。需要运动、过程、上下文 —— **单帧大多判不了**。
+        集结/侦察/伪装都是带意图的动作, 意图要从变化里读。
+        一排停着的车和一支停下来的车队, 像素上没有区别。
+    - id: indicator
+      zh: 征候族
+      note: >-
+        客观**存在什么**。画面里看得见的物理现象, 单帧足够。
+        烟就是烟, 弹坑就是弹坑。现有数据几乎全落在这一族。
 
 classes:
+  # ===========================================================================
+  # 正常
+  # ===========================================================================
   - id: normal
     zh: 正常
+    domain: land
+    family: indicator
     enabled: true
     cues: ["无成规模目标聚集", "无烟火", "无越界行为"]
+    data: {sources: [全部], status: ready}
 
-  - id: massing
-    zh: 异常聚集
+  # ===========================================================================
+  # 征候族 —— 单帧可判, 现有数据主要落在这里
+  # ===========================================================================
+  - id: smoke
+    zh: 烟雾
+    domain: land
+    family: indicator
     enabled: true
-    cues: ["目标密集成簇", "规则排列/列阵", "开阔地带集中"]
+    # **烟雾与火光分开, 不合并成一个「火情」。**
+    # 草案里曾把两者并为一类的三级事件, 但: ①FASDD 本来就分开标注;
+    # ②两类各有 12899 / 8259 张图, 都够训; ③视觉特征与作战含义不同
+    # (烟可能来自远处或用于遮蔽, 火是正在燃烧)。合并会白白丢掉一个能训的区分。
+    cues: ["边界模糊的半透明团块", "遮住下方地表纹理", "有扩散方向"]
+    events:
+      - {id: smoke_plume, zh: 烟柱}
+      - {id: smoke_layer, zh: 烟幕/平铺烟层}
+    data:
+      sources: [FASDD_UAV]
+      images: 12899
+      status: ready
+      verified: "自由看图 12/12 确认"
+    rule: {kind: label_transfer, from_labels: ["smoke", "Smoke"]}
+
+  - id: explosion
+    zh: 火光爆炸
+    domain: land
+    family: indicator
+    enabled: true
+    cues: ["高亮度火球或火线", "向外骤降的亮度梯度", "伴随烟尘"]
+    events:
+      - {id: open_flame, zh: 明火}
+      - {id: blast,      zh: 爆炸火光}
+    data:
+      sources: [FASDD_UAV, ERA]
+      images: 8259
+      status: ready
+      verified: "自由看图 12/12 确认"
+    rule: {kind: label_transfer, from_labels: ["fire", "Explosion", "Arson"]}
+
+  - id: disaster
+    zh: 灾害现场
+    domain: land
+    family: indicator
+    enabled: true
+    # v0.5.1 曾以「没有数据源」停用 —— **那个结论下早了**。
+    # ERA 实际有 flood/landslide/mudslide/post_earthquake/traffic_collision
+    # 五个标签共约 1056 条, 是真标注不是几何推断, 属于活得下来的那一类。
+    # 恢复启用。但 status 是 thin, 见 data.note。
+    cues: ["大面积水体漫过原有地表", "山体垮塌与泥流痕迹", "建筑成片倒塌",
+           "道路中断或被掩埋", "车辆异常聚集于事故点"]
     subtypes:
-      # 人员: 不要求军事身份 —— 航拍视角无法分辨军装与便装,
-      # 且禁区周边大规模人员聚集本身即为需上报的异常
+      - {name: flood,     zh: 洪涝}
+      - {name: landslide, zh: 滑坡泥石流}
+      - {name: collapse,  zh: 建筑垮塌}
+      - {name: collision, zh: 交通事故}
+    data:
+      sources: [ERA]
+      images: 1056
+      status: thin
+      note: >-
+        凑 25000 条需每图出题 23.7 次 —— 远超 qa_per_image.max, 那是同质化不是数据量。
+        候选补充源: FloodNet / RescueNet / xBD。
+    rule: {kind: label_transfer,
+           from_labels: ["flood", "landslide", "mudslide", "post_earthquake",
+                         "traffic_collision"]}
+
+  - id: concentration
+    zh: 密集分布
+    # domain 按被聚集资产的类型走, 见文件头。这里是 land(车辆/人群)的部分,
+    # air/sea 的同名类在下面单列。
+    domain: land
+    family: indicator
+    enabled: false
+    # **这是整个体系里最容易出错的一格, 也是这一版最重要的新增。**
+    # concentration(密集分布) 与 massing(集结) 在**构型上完全一样**,
+    # 区别只在「是不是正在汇聚」。前者是可观测的客观事实, 后者是行为判断。
+    # 混为一谈, 就是教模型看见任何停车场、任何广场都报警。
+    #
+    # 它是**正面标签**, 不只是 massing 的负样本 —— 这正是它开不了的原因, 见
+    # data.blocked_by: 同一批图现在同时是 massing 的 hard_negative,
+    # 而 hard_negative 会生成「未见异常」的答案, 与一个正面事件直接打架。
+    cues: ["目标密集排布", "间距规整", "位于场站/停车区/广场"]
+    events:
+      - {id: vehicle_parking, zh: 车辆密集停放}
+      - {id: crowd,           zh: 人群密集}
+    data:
+      sources: [DroneCrowd, VisDrone2019-MOT, VisDrone2019-DET, DOTA-v2.0]
+      images: null
+      status: ready
+      note: >-
+        素材是现成的: DroneCrowd 3176 + VisDrone 4045 现在全部走 massing 的
+        hard_negative_datasets, 图数量级在七千上下(**待精确统计**)。
+      blocked_by: >-
+        缺的是代码不是数据。build_vqa 的 hard_negative 分支会出「未见异常」,
+        而本类是正面标签 —— 同一张图两种口径, 正是 qc_consistency 会抓的自相矛盾。
+        要先让 build_vqa 支持「有 concentration 事件时, 负样本答案改为
+        『达到密集规模但非集结』」, 再把 enabled 改回 true。
+    rule:
+      kind: density_cluster
+      target_classes: ["vehicle", "large-vehicle", "truck", "car",
+                       "person", "pedestrian", "people"]
+      min_cluster_size: 12
+      eps_ratio: 0.05
+      eps_obj_mult: 3.0
+      min_core_neighbors: 3
+      max_area_per_object: 20
+
+  - id: air_concentration
+    zh: 机群密集停放
+    domain: air
+    family: indicator
+    enabled: false
+    # MAR20 的 3842 张停机坪。「停机坪上排列整齐的军机属于日常停放, 不构成集结」
+    # 这句话本身就该训 —— 而把它训成**正面标签**比训成 massing 的负样本更值:
+    # 负样本只能说「不是什么」, 正面标签能说「是什么」。
+    #
+    # CLAUDE.md 里「移出 target_classes 这批图就变成平平无奇的正常样本」的顾虑,
+    # 到这一版失效了: 它们不再是正常样本, 而是本类的正样本。
+    cues: ["停机坪上排列整齐", "机头朝向一致", "位于固定机位"]
+    events:
+      - {id: apron_parking, zh: 停机坪停放}
+    data:
+      sources: [MAR20, DOTA-v2.0]
+      images: 3842
+      status: ready
+      verified: "自由看图确认「机场停机坪, 飞机静止停放, 排列整齐」"
+      blocked_by: >-
+        同 concentration: 这批图目前落在 massing/equipment 的
+        on_require_fail: hard_negative 上(kind=aircraft_parking)。
+        两边同时开会自相矛盾, 要先改 build_vqa 再切换。
+    rule:
+      kind: density_cluster
+      target_classes: ["military-plane", "civil-plane",
+                       "military-helicopter", "civil-helicopter"]
+      min_cluster_size: 4
+      eps_ratio: 0.08
+      eps_obj_mult: 3.0
+      min_core_neighbors: 2
+      max_area_per_object: 12
+
+  - id: sea_concentration
+    zh: 舰船密集停泊
+    domain: sea
+    family: indicator
+    enabled: false
+    cues: ["泊位排列", "紧邻码头", "舰艏朝向一致"]
+    events:
+      - {id: harbor_berthing, zh: 港口停泊}
+    data:
+      sources: [DOTA-v2.0]
+      images: null
+      status: thin
+      note: >-
+        DOTA 有 ship / harbor 两类框, 但**按图统计没跑过**, 不知道有多少张图
+        真能凑出一簇。在跑出数字之前不写估计值 —— 上一轮「车队能有几千」
+        就是这么错的。
+      blocked_by: "同 air_concentration; 另需先统计图数确认 status。"
+    rule:
+      kind: density_cluster
+      target_classes: ["ship", "warship", "harbor"]
+      min_cluster_size: 5
+      eps_ratio: 0.08
+      eps_obj_mult: 3.0
+      min_core_neighbors: 2
+      max_area_per_object: 12
+
+  - id: damage
+    zh: 毁伤
+    domain: land
+    family: indicator
+    enabled: false
+    cues: ["弹坑", "车辆残骸", "建筑坍塌", "烧蚀痕迹"]
+    events:
+      - {id: crater,          zh: 弹坑}
+      - {id: wreckage,        zh: 装备残骸}
+      - {id: building_damage, zh: 建筑损毁}
+    data:
+      sources: []
+      images: 0
+      status: empty
+      note: "留空待补。候选: xBD(建筑损毁四级分级, 卫星视角)。"
+
+  - id: infra_change
+    zh: 设施变化
+    domain: land
+    family: indicator
+    enabled: false
+    cues: ["新增建筑", "道路开辟", "场地平整"]
+    events:
+      - {id: new_construction, zh: 新增建筑}
+      - {id: road_opening,     zh: 道路开辟}
+    data:
+      sources: []
+      images: 0
+      status: empty
+      note: "留空待补。**需要前后配对影像**。候选: SpaceNet 多时相子集。"
+
+  # ===========================================================================
+  # 行为族 —— 需要过程/多帧, 现有单帧数据基本填不了
+  #
+  # **全部留空不删。** 这一轮 border_crossing / convoy 就是硬用单帧几何去推
+  # 行为语义, 结果是教模型编造。schema 留好, 拿到多帧或仿真数据直接往里填,
+  # 不用重构。
+  # ===========================================================================
+  - id: massing
+    zh: 集结
+    domain: land
+    family: activity
+    enabled: true
+    # **集结 ≠ 密集分布。** 集结说的是「力量向某处汇聚」这个动作,
+    # 密集停放是静态事实。真正的区别在于「是不是正在汇聚」, 而这需要过程 ——
+    # 单帧只能给一个瞬间构型。现在撑得住的只有 ERA 的游行/抗议/冲突(真事件标签)
+    # 和 Mendeley 的坦克编队。
+    cues: ["目标向同一区域汇聚", "规模显著高于常态", "位于开阔地而非场站"]
+    events:
+      - {id: personnel_massing, zh: 人员集结}
+      - {id: equipment_massing, zh: 装备集结}
+      - {id: field_camp,        zh: 野战帐篷集结}
+    data:
+      sources: [ERA, Mendeley-UAV-Military]
+      images: null
+      status: thin
+      note: >-
+        清理前是 1007(personnel 923 + equipment 84)。**这个数字已经作废** ——
+        concert / party / religious_activity 三个标签已从 ERA 的 massing 映射里
+        移除(演唱会和宗教活动不是军事异常), 需要重跑 derive_events 重新统计。
+        即便按清理前的 1007 算, 凑 25000 条也需每图出题 27 次, 远超
+        qa_per_image.max。这一类**必须补数据源**, 不能靠在同一批画面上反复出题。
+    subtypes:
+      # 人员: 不要求军事身份 —— 航拍视角无法分辨军装与便装, 且禁区周边大规模
+      # 人员聚集本身即为需上报的异常。
       - name: personnel
-        zh: 人员聚集
+        zh: 人员集结
         rule:
           kind: density_cluster
           target_classes: ["person", "pedestrian", "people", "soldier", "head"]
           # 城市街景里的人不算集结。VisDrone 的图里动辄一百多个 person, 但同框
-          # 还有几十辆车和摩托 —— 那是逛街的人流, 不是聚集。实测抽样中 123 人 + 8 车、
-          # 42 人 + 6 摩托 都被判成了"人员聚集", 属于错标。
-          # 判据: 同框的车辆类目标超过 traffic_veto_count 就否决, 并转为困难负样本 ——
-          # "街上很多人但不是集结"恰恰是最该有的那类负样本。
+          # 还有几十辆车和摩托 —— 那是逛街的人流, 不是聚集。
           traffic_veto_classes: ["vehicle", "car", "motorcycle", "motor", "bicycle",
                                  "bus", "van", "truck", "large-vehicle"]
           traffic_veto_count: 5
           min_cluster_size: 20
           eps_ratio: 0.04
           eps_obj_mult: 3.0        # 邻域半径下限 = 3 倍目标尺寸, 使判定不随裁剪尺寸漂移
-          # v0.5.4 新增两条, **都是自由看图逼出来的**。
-          # DroneCrowd 那几张标注有 158/175 个人头, 模型的原话却是
-          # 「呈散点状分布，并非密集拥挤」「人群非常稀疏」—— 人是散在整个广场上的。
-          #
-          # 根因是单链接聚类的链式效应: 纯 union-find 等价于 DBSCAN 的 minPts=1,
-          # 一广场零散行人只要首尾相接就串成一个大簇。实测 1920x1080 里 158 人
-          # 均匀散布(绝非聚集)照样聚出 20 人的簇, 刚好撞上 min_cluster_size。
+          # 纯 union-find 等价于 DBSCAN 的 minPts=1, 一广场零散行人只要首尾相接
+          # 就串成一个大簇。实测 1920x1080 里 158 人均匀散布照样聚出 20 人的簇。
           #   min_core_neighbors  = DBSCAN 的 minPts, 只有核心点能连通两团
-          #   max_area_per_object = 簇要够密: 每个目标平均占的簇面积 / 目标面积
-          # 后者的门槛是量出来的: 均匀散布 27~32 倍, 真聚集 5.4~16.5 倍。
-          # (最近邻距离试过, 两者 1.4~3.3 完全重叠, 没用。)
+          #   max_area_per_object = 簇要够密: 每目标平均占的簇面积 / 目标面积
+          # 门槛是量出来的: 均匀散布 27~32 倍, 真聚集 5.4~16.5 倍。
           min_core_neighbors: 3
           max_area_per_object: 20
-          # v0.5.6: **这两个数据源整体只做困难负样本, 不产出 massing 事件。**
-          # 定向复查(docs/16_free_look_massing_recheck.md, 15 张逐条核对)的结论:
-          # 11/15 是误报。标注 99 人的图模型说「没有看到明显的人群聚集」,
-          # 标注 169 人的说「绝对没有"密密麻麻一片"的情况」。
-          #
-          # 根因是**类目错配, 不是阈值**: DroneCrowd 是人群**计数**数据集,
-          # 拍的是广场、校园、路口、球场 —— 里面根本没有「异常聚集」这个现象。
-          # 从「校园广场上 117 个行人」提不出异常, 再准的密度判据也提不出。
-          # VisDrone 同理, 拍的是城市街景。
-          #
-          # 但这些图**没有浪费**, 反而各得其所:
-          #   · 困难负样本 —— 人很多却不是异常, 直接教模型别一看到人多就报警
-          #   · 计数题     —— DroneCrowd 本行就是人群计数, 素材质量极高
-          # 「异常聚集」现在只由 ERA 的游行/抗议/集会标签供给(真正的异常事件)。
+          # **这两个数据源整体只做困难负样本**(类目错配, 不是阈值问题):
+          # DroneCrowd 是人群计数数据集, 拍的是广场/校园/路口/球场, 里面根本
+          # 没有「异常聚集」这个现象。定向复查 15 张 11 张是误报。
+          # 这些图的正确归宿是上面的 concentration(密集分布), 那是正面标签。
           hard_negative_datasets: ["DroneCrowd", "VisDrone2019-MOT", "VisDrone2019-DET"]
-          # 补量用的放宽档。只在该类产量不够时由 derive_events --relax-below 启用,
-          # 命中的事件打 relaxed 标记, 答案改用"小规模聚集"这类留有余地的说法,
-          # 不会拿放宽出来的样本去冒充典型集结。
           relax:
             min_cluster_size: 12
             eps_ratio: 0.055
             eps_obj_mult: 3.5
-      # 装备: 必须含军事目标。纯民用车辆聚集(停车场/卡车场)是最大错标源,
-      # 命中规模但不含军事目标者标为 hard_negative, 作为困难负样本
+      # 装备: 必须含军事目标。纯民用车辆聚集(停车场/卡车场)是最大错标源。
       - name: equipment
         zh: 装备集结
         rule:
           kind: density_cluster
-          # v0.5.5: **航空器整体移出这一类。**
-          # 「集结」说的是地面力量向某处汇聚这个**动作**；停机坪上停着的飞机是
-          # 机场的常态，是静态事实。自由看图里模型对 MAR20 的原话就是
-          #   「机场停机坪，飞机静止停放，排列整齐」
-          #   「所有飞机均处于静止停放状态…没有看到烟、火、人群或移动的车队」
-          # 把它训成「异常聚集」，等于教模型看见任何一个军用机场都报异常。
-          #
-          # 代价说清楚: MAR20 的 3842 张(全是 military-plane)不再产生 massing 事件,
-          # massing/equipment 会大幅缩水，基本只剩 Mendeley 的坦克簇。
-          # **但 MAR20 本身没有浪费** —— 它照样是:
-          #   · 正常/负样本(军用机场的日常态势)
-          #   · 计数题、描述题、带框定位题的优质素材(军机识别)
-          # 只是不该顶着「异常聚集」这个标签。
-          #
-          # 舰船同理留着 warship: 军舰成群停泊仍算集结, 民用港口由 require_any 挡掉。
-          #
-          # **航空器仍留在 target_classes 里, 但从 require_any 里拿掉。**
-          # 这样一片停机坪照样会聚成簇, 然后因为不含地面军事装备落进
-          # on_require_fail: hard_negative —— 正是我们想要的:
-          # 「看着像集结(一堆军用装备聚在一起)但不是」恰恰是最有价值的困难负样本,
-          # 直接教模型分清「密集停放」与「集结」。
-          # 移出 target_classes 的话这批图会变成平平无奇的正常样本, 白白浪费。
+          # 航空器/舰船留在 target_classes 里但不在 require_any 里: 一片停机坪
+          # 照样聚成簇, 然后因为不含地面军事装备落进 on_require_fail,
+          # 成为「看着像集结但不是」的困难负样本。
+          # **这是过渡状态** —— air_concentration / sea_concentration 一旦解封,
+          # 这批图改由那两类以正面标签承接, 届时从这里移除。
           target_classes: ["vehicle", "large-vehicle", "truck", "car", "tank",
                            "military-vehicle", "military-truck", "armored",
                            "civil-plane", "military-plane", "civil-helicopter",
                            "military-helicopter", "ship", "warship"]
-          # 阈值按地面装备的规模定, 不按民用停车场。
-          # 5 件军事装备集中停放已构成集结; 民用目标由 require_any 排除,
-          # 不靠数量阈值把关。
           min_cluster_size: 5
           eps_ratio: 0.06
-          eps_obj_mult: 3.0        # 同上; DOTA 切片后图像变小, 只按对角线取会漏判
-          # 装备类目标大、间距相对车长小, 所以密度门槛可以比人员松,
-          # 核心点要求也低一档(装备本来就少)。
+          eps_obj_mult: 3.0
           min_core_neighbors: 2
           max_area_per_object: 12
           relax:
-            min_cluster_size: 3    # 3 件军事装备集中停放, 只能说"小规模集结迹象"
+            min_cluster_size: 3    # 3 件军事装备集中停放, 只能说「小规模集结迹象」
             eps_ratio: 0.08
             eps_obj_mult: 4.0
-          # 军用与民用必须分开命名。DOTA 的 ship 多为民用港口, 只有 warship 才计入。
-          # (航空器已整体移出这一类, 见上。)
           require_any: ["tank", "military-vehicle", "military-truck", "armored",
                         "warship"]
           on_require_fail: hard_negative
 
-  - id: explosion
-    zh: 爆炸/火光
-    enabled: true
-    cues: ["强亮斑与火球", "扬尘与碎片扩散", "瞬时高对比亮区"]
-    rule: {kind: label_transfer, from_labels: ["Explosion", "fire", "Arson", "Riot"]}
-
-  - id: smoke
-    zh: 烟雾
-    enabled: true
-    cues: ["烟柱", "灰白扩散团", "烟幕遮蔽地表"]
-    rule: {kind: label_transfer, from_labels: ["smoke", "Smoke", "fire"]}
-
-  # ── v0.5.0 停用。停用理由(不是数据不够, 是这一类本身立不住):
-  #   1. 越界是"轨迹与边界的关系", 单帧里看不见 —— 运动看不见, 边界更看不见;
-  #   2. 那条边界是我们自己画的虚拟线, 图上根本不存在。把它写进问题(「设有一条
-  #      近似垂直纵贯画面的虚拟警戒线」), 等于用自然语言往图里注入一个不存在的
-  #      几何前提, 再要模型在脑子里画出来判断相交 —— 这是在教模型顺着话编。
-  #   3. 数据也只有 VisDrone-MOT 一个来源, 且人工核对困难。
-  # 要恢复的话, 正确做法是把警戒线**真的画到图上**(半透明红线), 让它变成纯视觉题,
-  # 和真实电子围栏一致; 而不是用文字描述一条看不见的线。
-  - id: border_crossing
-    zh: 越界移动
+  - id: maneuver
+    zh: 机动
+    domain: land
+    family: activity
     enabled: false
-    cues: ["目标轨迹跨越边界线", "进入禁入区域", "由界外向界内移动"]
-    rule:
-      kind: boundary_cross
-      target_classes: ["person", "vehicle", "soldier", "truck"]
-      min_displacement_ratio: 0.02   # 相对图像对角线的最小位移, 过滤抖动
-      # 越界只有 VisDrone-MOT 一个来源, 是四类里最紧的一类, 放宽档必然用得上:
-      # 位移门槛减半 + 允许更多类目标越界。
-      relax:
-        min_displacement_ratio: 0.01
-        target_classes: ["person", "vehicle", "soldier", "truck", "car", "van",
-                         "bus", "motor", "pedestrian", "people"]
+    cues: ["成建制移动", "队形保持", "有明确行进方向"]
+    events:
+      - {id: convoy,         zh: 车队机动}
+      - {id: armored_column, zh: 装甲纵队行进}
+      - {id: rail_transport, zh: 铁路输送}
+    data:
+      sources: []
+      images: 0
+      status: empty
+      note: >-
+        **留空。** 单帧几何做 convoy 已验证失败, 实证见下面的 convoy 条目。
+        需要多帧看位移, 或仿真引擎直接给出「正在行进」的真值。
 
-  - id: disaster
-    zh: 灾害现场
-    enabled: false
-    # v0.5.1 停用。**理由不是规则不成立，是没有数据。**
-    # 全库扫下来 disaster 事件数为 0：能贡献这一类的只有 ERA 的
-    # flood/landslide/mudslide/post_earthquake/traffic_collision 几个标签，
-    # 而 ERA 全库只有 2173 条（且 video 与 SingleFrames 是同一批，不能算两次），
-    # 落到这五个标签上所剩无几。公开数据里合适的源（FloodNet / RescueNet /
-    # xBD）都需要另外下载，本轮不引入。
-    # 规则和 prompt 都原样留着：哪天补上数据源，把 enabled 改回 true 即可，
-    # 不必重写。
-    #
-    # 以下为原始设计说明（仍然有效）：
-    # ERA 的 flood / landslide / mudslide / post_earthquake /
-    # traffic_collision 原本被整个排除, 理由是"画面常含烟尘火光, 既不能当异常
-    # 也不能当正常"。但那个理由只在它们**没有自己的类别**时成立 —— 单列一类,
-    # 歧义就消失了: 它们不再是"说不清算不算异常", 而是明确的第五类。
-    # 顺带救回上一轮被丢掉的那 691 段视频。
-    #
-    # 这一类是航拍异常检测里最好判的: 洪水、滑坡、废墟在俯视角下极其显著,
-    # 单帧就能判, 不需要任何外部前提。
-    cues: ["大面积水体漫过原有地表", "山体垮塌与泥流痕迹", "建筑成片倒塌",
-           "道路中断或被掩埋", "车辆异常聚集于事故点"]
-    subtypes:
-      - {name: flood, zh: 洪涝}
-      - {name: landslide, zh: 滑坡泥石流}
-      - {name: collapse, zh: 建筑垮塌}
-      - {name: collision, zh: 交通事故}
-    rule: {kind: label_transfer,
-           from_labels: ["flood", "landslide", "mudslide", "post_earthquake",
-                         "traffic_collision"]}
-
-  # ---------------------------------------------------------------- 已停用
-  # 恢复方式: enabled 改 true。但请先确认数据量能支撑 25,000 条 QA(约 2,800 张图)。
-
-  - id: fortification
-    zh: 阵地/工事构筑
-    enabled: false
-    # 停用原因: ERA constructing 抽帧去重后仅约 300 张可用图, 差 9 倍;
-    # 公开数据中掩体/壕沟/火炮阵地影像基本为零; 判定本质需要同一地点的
-    # 多时相对比, 而现有数据源全为单时相。需真实内部影像或 ARMA3 合成才可开启。
-    cues: ["新增土方与壕沟", "掩体轮廓", "工程机械作业"]
-    rule: {kind: label_transfer, from_labels: ["constructing", "excavator"]}
-
+  # convoy 是 maneuver 的三级事件, 按理不该单列成 class。
+  # **单列的唯一理由是规则要有挂载点, 而且必须一直可测** ——
+  # derive_events.resolve_overlap 和 tests/convoy_fixture.py 都按
+  # e.type == "convoy" 找事件。停用是「数据上分不出来」, 不是「规则写错了」。
+  # rule_only: true 标记它不是训练标签, 统计口径归到 parent。
   - id: convoy
     zh: 车队机动
+    domain: land
+    family: activity
+    parent: maneuver
+    rule_only: true
     enabled: false
-    # v0.5.5 停用。**理由是自由看图的实证，不是规则写得不对。**
-    # 让模型无约束描述 12 张被判为 convoy 的图，7 张的原话是
-    #   「车辆均为静止停放状态，没有形成车队或拥堵」
-    #   「车辆分布较为稀疏，没有形成拥堵的车队」
-    #   「停放着多辆汽车…排列相对整齐」
-    # 603 条里多半是路边停车和停车场的一排车。
+    # v0.5.5 停用。**理由是自由看图的实证, 不是规则写得不对。**
+    # 12 张被判为 convoy 的图里 7 张模型的原话是「车辆均为静止停放状态」
+    # 「车辆分布较为稀疏, 没有形成拥堵的车队」。603 条里多半是路边停车。
     #
-    # 几何上也早就量明白了（见 tests/convoy_fixture.py 的 docstring）：
-    # 停车场的一排车本身就是共线 + 等距 + 细长，单帧里和车队没有区别。
-    # 40 辆随机散车能凑出比真车队还整齐的"队列"（CV 0.077 vs 0.156）。
-    # 和 border_crossing 是同一类问题：单帧看不到运动。
-    #
-    # 规则、prompt、对照测试全部原样留着。要重新启用，得先有：
-    #   · 多帧素材（看得到车在动），或
-    #   · 含真实军用车队的数据源
-    # 改回 enabled: true 即可，tests/convoy_fixture.py 会自动把它打开来测。
-    # v0.5.0 启用。当初停用的理由是"与正常道路交通无法可靠区分" —— 那是因为
-    # 判据只有"共线 + 数量", 而正常车流同样共线。补上三条才分得开:
-    #   间距均匀(车队保队形, 车流忽快忽慢)、车型一致(车队同型, 车流混杂)、
-    #   细长(车队是一条, 停车场是一片)。实测: 军卡车队命中, 混杂车流与停车场式
-    #   排布都不命中。
+    # 几何上也早就量明白了(见 tests/convoy_fixture.py 的 docstring):
+    # 停车场的一排车本身就是共线 + 等距 + 细长, 单帧里和车队没有区别。
+    # 40 辆随机散车能凑出比真车队还整齐的「队列」(CV 0.077 vs 0.156)。
     cues: ["车辆沿道路线性排列", "间距均匀", "同型同向", "队列细长"]
+    data:
+      sources: []
+      images: 0
+      status: empty
+      note: "规则、prompt、对照测试全部原样留着。有多帧素材即可 enabled: true。"
     rule:
       kind: linear_formation
       target_classes: ["military-truck", "military-vehicle", "armored", "tank",
@@ -255,44 +429,24 @@ classes:
       min_count: 5
       collinearity_r2: 0.92
       max_spacing_cv: 0.45        # 间距变异系数上限 —— 超过就是车流不是车队
-      # v0.5.3 新增, **改用"找共线子集"之后必须有这一条**。
-      # 旧算法要求全图所有车共线，候选本来就已经是车队了；现在从满图散车里搜
-      # 共线子集，搜索空间大了几个量级，光靠 CV 挡不住：实测 40 辆随机散车凑出
-      # 的最好一条线 CV 能低到 0.077，比带抖动的真车队（中位 0.156）还整齐。
-      # 真正分得开的是平均间距相对车身长度 —— 真车队最大 4.0 倍，随机凑线最小
-      # 5.8 倍。取 5.0 卡在中间。高速上拉得开的车队可能被误杀，那是有意的取舍：
-      # 宁可漏，不许把散车编成车队。
+      # 改用「找共线子集」之后必须有这一条。旧算法要求全图所有车共线, 候选本来
+      # 就已经是车队了; 现在从满图散车里搜共线子集, 搜索空间大了几个量级,
+      # 光靠 CV 挡不住(40 辆随机散车能到 0.077, 比真车队中位 0.156 还整齐)。
+      # 真正分得开的是平均间距相对车身长度: 真车队最大 4.0 倍, 随机凑线最小 5.8 倍。
       max_gap_obj_mult: 3.5
       # **这一条是精度的最后一道闸, 不要放宽。**
-      # 实测: 15 辆随机散车就能凑出间距 1.49 车长的"整齐队列", 而最紧的真车队
-      # 九成分位才 1.63；80 辆以上时随机线能压到 0.8 车长，比任何真车队都紧。
-      # 也就是说靠几何量分不开车队和密集车流 —— 停车场的一排车本身就是共线+
-      # 等距+细长。唯一还站得住的信号是"画面里的车基本都在这一列上"。
-      # 结果是 convoy 注定低产。想多捞就得接受假车队，那与第一条要求冲突。
+      # 15 辆随机散车就能凑出间距 1.49 车长的「整齐队列」, 80 辆以上时随机线
+      # 能压到 0.8 车长, 比任何真车队都紧。唯一还站得住的信号是
+      # 「画面里的车基本都在这一列上」。想多捞就得接受假车队, 与第一条要求冲突。
       min_inlier_ratio: 0.6
       band_obj_mult: 1.5          # RANSAC 内点带宽 = 车身的几倍
       max_lines: 3                # 一张图最多找几支车队
       max_candidates: 40          # 每轮考察多少条候选线
       min_elongation: 4.0         # 主轴跨度 / 垂直跨度 —— 低于这个是一片, 属集结
       min_same_class_ratio: 0.7   # 同型占比 —— 低于这个是混杂车流
-      # v0.5.2: **去掉 require_any 的军事目标约束。**
-      # 原来要求簇里必须含 military-truck/military-vehicle/armored/tank，
-      # 结果全库产量为 0 —— 只有 Mendeley 有 tank，而它每图目标中位数是 1、
-      # 九成分位才 5，640x640 的裁剪图凑不出五辆共线坦克。
-      #
-      # 撤掉这条的依据是：**"车队机动"本身并不必然是军用**，而且把民用车流
-      # 排除掉的活儿，上面四条判据已经干完了 —— 造了七种对照场景实测：
-      #   坦克列 / 军卡列          -> 命中
-      #   混杂车流(车型杂)          -> 不命中
-      #   间距忽大忽小(走走停停)     -> 不命中
-      #   停车场式一片(不细长)       -> 归 massing 而非 convoy
-      #   只有四辆(低于 min_count)   -> 不命中
-      # 也就是说 require_any 在这里是**第五道**约束，不是唯一那道。
-      #
-      # 代价说清楚：民用卡车车队现在会判成 convoy。这是有意的 —— 训练目标是
-      # "认出成队行进的车列"，至于是不是军用，交给 military_grade 这个证据字段
-      # 和描述题去表达，而不是在事件层面一刀切掉。
-      # 要退回旧行为：把下面两行取消注释即可。
+      # 不加军事目标约束: 「车队机动」本身并不必然是军用, 而且排除民用车流的活儿
+      # 上面四条判据已经干完了。是不是军用交给 military_grade 证据字段去表达。
+      # 要退回旧行为, 把下面两行取消注释即可。
       # require_any: ["military-truck", "military-vehicle", "armored", "tank"]
       # on_require_fail: hard_negative
       military_classes: ["military-truck", "military-vehicle", "armored", "tank",
@@ -302,25 +456,126 @@ classes:
         collinearity_r2: 0.88
         max_spacing_cv: 0.55
 
-  - id: naval_massing
-    zh: 舰船集结
+  - id: incursion
+    zh: 越界
+    domain: land
+    family: activity
     enabled: false
-    # 停用原因: DOTA/FAIR1M 的 ship 绝大多数是民用港口, 错标风险高。
-    # 军用舰船集结已并入 massing/equipment 的 require_any(warship)。
-    cues: ["港口舰船密集停泊", "海上编队航行"]
-    rule:
-      kind: density_cluster
-      target_classes: ["ship", "vessel", "maritime-vessel", "warship"]
-      min_cluster_size: 6
-      eps_ratio: 0.08
+    cues: ["越过边界线", "进入禁区", "抵近敏感目标"]
+    events:
+      - {id: border_crossing, zh: 越过边界线}
+      - {id: zone_intrusion,  zh: 进入禁区}
+    data:
+      sources: []
+      images: 0
+      status: empty
+      note: >-
+        **留空。** 单帧既看不到运动, 也没有「边界线」这个东西 ——
+        边界是先验知识不是像素。需要多帧 + 已知边界位置。
 
-  - id: air_activity
-    zh: 航空活动异常
+  # 同 convoy: 三级事件单列, 只为给规则一个挂载点。
+  - id: border_crossing
+    zh: 越界移动
+    domain: land
+    family: activity
+    parent: incursion
+    rule_only: true
     enabled: false
-    # 停用原因: 与 massing/equipment 重叠, 机群集结已由后者覆盖。
-    cues: ["停机坪飞机数量异常", "直升机起降", "机群列队"]
+    cues: ["目标轨迹跨越边界线", "进入禁入区域", "由界外向界内移动"]
+    data:
+      sources: []
+      images: 0
+      status: empty
+      note: >-
+        只有 VisDrone-MOT 一个来源, 而且「边界」是我们自己画的虚拟线 ——
+        单帧里既看不到运动也看不到线。规则保留可测。
     rule:
-      kind: density_cluster
-      target_classes: ["plane", "helicopter", "aircraft", "fixed-wing-aircraft"]
-      min_cluster_size: 6
-      eps_ratio: 0.10
+      kind: boundary_cross
+      target_classes: ["person", "vehicle", "soldier", "truck"]
+      min_displacement_ratio: 0.02   # 相对图像对角线的最小位移, 过滤抖动
+      relax:
+        min_displacement_ratio: 0.01
+        target_classes: ["person", "vehicle", "soldier", "truck", "car", "van",
+                         "bus", "motor", "pedestrian", "people"]
+
+  - id: recon
+    zh: 侦察
+    domain: air
+    family: activity
+    enabled: false
+    cues: ["长时盘旋", "异常航线", "抵近观察"]
+    events:
+      - {id: loiter,     zh: 长时盘旋}
+      - {id: close_pass, zh: 低空通场}
+    data:
+      sources: []
+      images: 0
+      status: empty
+      note: "留空。**轨迹形态**是判据, 单点位置说明不了任何事。"
+
+  - id: concealment
+    zh: 伪装隐蔽
+    domain: land
+    family: activity
+    enabled: false
+    cues: ["伪装网覆盖", "假目标", "掩体隐蔽"]
+    events:
+      - {id: camo_net,  zh: 伪装网}
+      - {id: decoy,     zh: 假目标}
+      - {id: revetment, zh: 掩体隐蔽}
+    data:
+      sources: []
+      images: 0
+      status: empty
+      note: >-
+        留空。需要与常态对比或前后对照。**仿真引擎天然成对**
+        (同一目标的裸露态 vs 覆盖态), 是最适合仿真补的一类。
+
+  - id: fortification
+    zh: 工事构筑
+    domain: land
+    family: activity
+    enabled: false
+    cues: ["新增土方与壕沟", "掩体轮廓", "工程机械作业", "阵地开设"]
+    events:
+      - {id: trench,   zh: 壕沟}
+      - {id: position, zh: 阵地开设}
+    data:
+      sources: []
+      images: 0
+      status: empty
+      note: >-
+        留空。ERA constructing 抽帧去重后仅约 300 张, 差一个数量级, 已在
+        ds/era.py 的 EXCLUDE 里。本质需要同一地点的多时相对比, 现有数据源全为单时相。
+    rule: {kind: label_transfer, from_labels: ["constructing", "excavator"]}
+
+  - id: coordination
+    zh: 协同
+    domain: land
+    family: activity
+    enabled: false
+    cues: ["多实体同步活动", "多兵种混编", "指挥所开设"]
+    events:
+      - {id: joint_ops,    zh: 多兵种混编}
+      - {id: command_post, zh: 指挥所开设}
+    data:
+      sources: []
+      images: 0
+      status: empty
+      note: "留空。需要多目标的时空关联, 单帧给不了「同步」这个信息。"
+
+  - id: logistics
+    zh: 补给保障
+    domain: land
+    family: activity
+    enabled: false
+    cues: ["物资囤积", "装卸作业", "油料补给"]
+    events:
+      - {id: supply_dump, zh: 物资囤积}
+      - {id: refueling,   zh: 油料补给}
+      - {id: loading,     zh: 装卸作业}
+    data:
+      sources: []
+      images: 0
+      status: empty
+      note: "留空。场站 + 反复往返是判据, 单帧看不出往返。"

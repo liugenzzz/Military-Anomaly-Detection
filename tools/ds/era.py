@@ -40,13 +40,25 @@ ANOMALY = {
     "mudslide": ("disaster", "landslide"),
     "post_earthquake": ("disaster", "collapse"),
     "traffic_collision": ("disaster", "collision"),
+    # 冲突/游行/抗议 -> 集结。这三个是**带对抗或诉求性质的人员汇聚**,
+    # 是真正需要上报的事件, ERA 的标签本身就是事实而非我们的推断。
     "conflict": ("massing", "personnel"),
     "parade_protest": ("massing", "personnel"),
     "parade": ("massing", "personnel"),
     "protest": ("massing", "personnel"),
-    "party": ("massing", "personnel"),
-    "concert": ("massing", "personnel"),
-    "religious_activity": ("massing", "personnel"),
+    # v1.0: **演唱会/派对/宗教活动移出 massing。**
+    # 这三类同样是大规模人群, 但它们是日常民事活动, 不是军事异常。
+    # 训成「集结」等于教模型看见任何一场演唱会都报警 —— 和 DroneCrowd 那批
+    # 广场图栽的是同一个坑: 类目错配, 不是阈值问题。
+    #
+    # 它们的正确归宿是 concentration(密集分布, 征候族的正面标签):
+    # 「画面里人群密集」是客观事实, 「这是集结」才是行为判断。
+    # concentration 当前 enabled: false(等 build_vqa 接线, 见本体的 blocked_by),
+    # 所以这一批现在会被 derive_events 按 enabled 丢掉并打印出来 ——
+    # 那是有意的, 比顶着错标签进训练集强。
+    "party": ("concentration", "crowd"),
+    "concert": ("concentration", "crowd"),
+    "religious_activity": ("concentration", "crowd"),
 }
 # 明确无烟火, 可安全作为负样本
 NORMAL = {

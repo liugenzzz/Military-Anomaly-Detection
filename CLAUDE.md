@@ -1,17 +1,19 @@
 # 军事异常检测多模态 VQA 数据集
 
-> ⚠️ **2026-09-16：方向需要重定，先读 `docs/00_RESTART_BRIEF.md`。**
+> ✅ **2026-09-16：方向已重定，类别体系落定为 `configs/ontology.yaml` v1.0.0。**
 >
-> 六个异常类里四个在验证中死掉，死因相同：**数据里没有这个现象**。
+> 上一轮六个异常类里四个在验证中死掉，死因相同：**数据里没有这个现象**。
 > 活下来的 smoke / explosion 都是数据集自带的真标注，死掉的四个都是
 > 靠几何规则从 bbox 推出来的高层语义。
 >
-> **下面这份文件记录的是「怎么做」（工具链、踩过的坑、代码约定），这部分仍然有效。
-> 但「做什么」（类别定义）需要重新来过 —— 那部分在重启简报里。**
+> 重定后的体系是**层次化多标签**：领域(air/sea/land) × 族(行为/征候) × 二级类型(训练标签)。
+> 设计过程见 `docs/00_RESTART_BRIEF.md`（为什么要重来）、`docs/01_taxonomy_draft.md`
+> （体系怎么设计的）、`docs/02_data_strategy.md`（数据从哪来）。
+> **权威定义只有一处：`configs/ontology.yaml`。** 文档是过程记录，配置是结论。
 
 ---
 
-> 这份文件记录需求、工具链、踩过的坑。每次开工先读它 + 重启简报，
+> 这份文件记录需求、工具链、踩过的坑。每次开工先读它 + 本体文件，
 > 不要靠翻聊天记录重建上下文。改了决策就改这里。
 
 ---
@@ -63,22 +65,69 @@
 
 ## 二、已定的决策（别再重新讨论）
 
-### 异常类别：四类
+### 异常类别体系（v1.0.0，2026-09-16 定）
 
-| 类 | id | 状态 | 数据来源 |
-|---|---|---|---|
-| 异常聚集 | `massing` | ✅ 启用 | **仅 ERA 的游行/抗议/集会 + Mendeley 坦克簇**，见下 |
-| 爆炸火光 | `explosion` | ✅ 启用 | FASDD_UAV / ERA |
-| 烟雾 | `smoke` | ✅ 启用 | FASDD_UAV |
-| ~~车队机动~~ | `convoy` | ❌ 停用 | v0.5.5。自由看图 12 张里 7 张模型说是「静止停放」 |
-| ~~越界移动~~ | `border_crossing` | ❌ 停用 | 单帧既看不到运动也看不到虚拟线，这类会教模型编造 |
-| ~~灾害现场~~ | `disaster` | ❌ 停用 | 规则成立，但没有数据源（2026-09 决定不再补数据集） |
+**层次化多标签**，不是单标签分类。一张图可以同时挂多个类
+（语料里 explosion+smoke 就共现 7819 次，硬做单标签本来就是错的）。
 
-停用的类**规则和 prompt 都原样留着**，补上数据源把 `enabled` 改回 `true` 即可。
-`tests/convoy_fixture.py` 会在自己的本体副本里强制打开 convoy —— 停用是「数据上
-分不出来」，不是「规则写错了」，规则逻辑必须一直可测。
+```
+领域 domain    air 空中 / sea 水面 / land 地面      ← 电磁域不做
+族   family    activity 行为族 / indicator 征候族
+二级 class     **训练标签**，模型要学会判的就是这些
+三级 event     只写进 metadata，**不作为独立训练类别**
+```
 
-### DroneCrowd / VisDrone 只做困难负样本 + 计数题（2026-09-16 定）
+- **行为族**：主体在**做什么**。需要运动、过程、上下文 —— **单帧大多判不了**。
+- **征候族**：客观**存在什么**。单帧足够。现有数据几乎全落在这一族。
+
+三级为什么不升成训练类别：瓶颈是**独立图数**，细分只会把同一批图切成更多
+更小的类，每格都不够训。数据够了随时提升，信息不丢。
+
+领域怎么判（必须有明确规则，否则标签噪声无穷）：行为族按**行为主体所属的
+作战域**（停机坪上的军机仍属 air）；征候族按**现象发生的位置**（舰上火情属
+sea）；`concentration` 例外，按**被聚集资产的类型**走。
+
+| 类 | id | 域/族 | enabled | 家底 |
+|---|---|---|---|---|
+| 烟雾 | `smoke` | land/征候 | ✅ | FASDD_UAV 12899，ready |
+| 火光爆炸 | `explosion` | land/征候 | ✅ | FASDD_UAV+ERA 8259，ready |
+| 灾害现场 | `disaster` | land/征候 | ✅ **恢复** | ERA 1056，thin |
+| 集结 | `massing` | land/行为 | ✅ | ERA+Mendeley，thin，**数字待重统** |
+| 密集分布 | `concentration` | land/征候 | ⛔ 接线中 | DroneCrowd+VisDrone ~7000，ready |
+| 机群密集停放 | `air_concentration` | air/征候 | ⛔ 接线中 | MAR20 3842，ready |
+| 舰船密集停泊 | `sea_concentration` | sea/征候 | ⛔ 接线中 | DOTA，图数待统计 |
+| 毁伤 | `damage` | land/征候 | ⛔ 无数据 | 候选 xBD |
+| 设施变化 | `infra_change` | land/征候 | ⛔ 无数据 | 需前后配对影像 |
+| 机动 | `maneuver` | land/行为 | ⛔ 无数据 | 三级含 `convoy` |
+| 越界 | `incursion` | land/行为 | ⛔ 无数据 | 三级含 `border_crossing` |
+| 侦察 | `recon` | air/行为 | ⛔ 无数据 | 判据是轨迹形态 |
+| 伪装隐蔽 | `concealment` | land/行为 | ⛔ 无数据 | **最适合仿真补**（天然成对） |
+| 工事构筑 | `fortification` | land/行为 | ⛔ 无数据 | 需多时相 |
+| 协同 | `coordination` | land/行为 | ⛔ 无数据 | 需时空关联 |
+| 补给保障 | `logistics` | land/行为 | ⛔ 无数据 | 需看往返 |
+
+**`enabled` 和 `status` 是两件事**，本体里分开记：
+
+- `status` 说**数据**够不够 —— `ready` / `thin`（硬凑就是同质化）/ `empty`
+- `enabled` 说这一轮跑不跑
+- `blocked_by` 说「有数据但开不了，缺的是**代码**」
+
+所以三个 `concentration` 是 `status: ready` + `enabled: false` + `blocked_by` ——
+素材现成，卡在 build_vqa 还没接线（见下一节）。这和 `damage` 那种真没素材的
+`empty` 是两回事，别混为一谈。
+
+**id 没有跟着草案改名。** 草案里 `explosion` 叫 fire、`fortification` 叫 fortify，
+没改：这些 id 已经写进 `adapters.py` 的 LABEL_MAP、`ds/era.py` 的 ANOMALY、
+`facets.py`、`build_vqa.py`，以及已落盘的 `all_ev.jsonl`。为一个内部字符串做
+全库改名，收益是零、风险是全库。分类学信息由 `domain` / `family` / `parent`
+三个字段承载，与 id 无关。
+
+**`convoy` / `border_crossing` 是三级事件，却仍单列为 class。** 唯一理由是
+规则要有挂载点且必须一直可测（`resolve_overlap` 和 `tests/convoy_fixture.py`
+都按 `e.type == "convoy"` 找事件）。它们带 `rule_only: true`，统计口径归到
+`parent`。停用是「数据上分不出来」，不是「规则写错了」。
+
+### DroneCrowd / VisDrone 不产出 massing（2026-09-16 定）
 
 定向复查（`docs/16_free_look_massing_recheck.md`，15 张逐条人工核对）：
 **11/15 是误报。** 标注 99 人的图模型说「没有看到明显的人群聚集」，标注 169 人的
@@ -88,10 +137,14 @@
 校园、路口、球场 —— 里面根本没有「异常聚集」这个现象。从「校园广场上 117 个
 行人」提不出异常，再准的密度判据也提不出。和 convoy / border_crossing 同类。
 
-配置在 `rule.hard_negative_datasets`。这些图没有浪费，反而各得其所：
+配置在 `massing/personnel` 的 `rule.hard_negative_datasets`。
+这些图没有浪费，反而各得其所：
 
-- **困难负样本** —— 人很多却不是异常，直接教模型别一看到人多就报警
 - **计数题** —— DroneCrowd 本行就是人群计数，GT 极可靠
+- **困难负样本** —— 人很多却不是异常，直接教模型别一看到人多就报警
+- **v1.0 新增：`concentration` 的正样本** —— 「人群密集」本身就是一个可训的
+  客观征候。等它接线完成，这批图从「否定句」升级成「正面标签」，
+  `hard_negative_datasets` 这一行届时可以撤掉。
 
 ⚠️ 计数题差点也丢了：`_count_mode` 原来先判「目标太小」就 `return "none"`，
 压根走不到「给量级」那一档，于是一图上百个人头点一道计数题都出不来。
@@ -100,13 +153,29 @@
 ### 「集结」不包括停放的航空器（2026-09-16 定）
 
 集结说的是**地面力量向某处汇聚这个动作**；停机坪上停着的飞机是机场常态、是静态
-事实。把它训成异常聚集，等于教模型看见任何一个军用机场都报异常。
+事实。把它训成异常聚集，等于教模型看见任何一个军用机场都报异常。同理，DroneCrowd
+那些广场图、ERA 的演唱会和宗教活动，都是人群密集但不是军事异常。
 
-**但 MAR20 那 3842 张没有浪费** —— 航空器仍留在 `target_classes` 里，只是从
-`require_any` 移出，于是停机坪照样聚成簇、然后落进 `on_require_fail: hard_negative`。
-「看着像集结（一堆军用装备聚在一起）但不是」恰恰是最有价值的困难负样本，直接教
-模型分清「密集停放」与「集结」。移出 `target_classes` 的话这批图会变成平平无奇
-的正常样本，白白浪费。
+**v1.0 给了它们一个正面标签**：`concentration` / `air_concentration` /
+`sea_concentration`（密集分布，征候族）。这比原来的做法更值 ——
+负样本只能说「不是什么」，正面标签能说「是什么」。
+
+| | 说的是 | 族 | 单帧能判吗 |
+|---|---|---|---|
+| `concentration` 密集分布 | 客观事实：目标密集排布 | 征候 | ✅ |
+| `massing` 集结 | 行为判断：力量正在汇聚 | 行为 | ❌ 需要过程 |
+
+**构型上两者完全一样**，区别只在「是不是正在汇聚」。混为一谈就是教模型看见任何
+停车场、任何广场都报警 —— 这是整个体系里最容易出错的一格。
+
+⚠️ **当前是过渡状态。** 三个 `concentration` 还是 `enabled: false`，因为
+`build_vqa` 的 `hard_negative` 分支会出「未见异常」，而本类是正面标签 ——
+同一张图两种口径，正是 `qc_consistency` 会抓的自相矛盾。在它接线之前：
+
+- MAR20 / 民用车簇仍走 massing/equipment 的 `on_require_fail: hard_negative`
+- ERA 的 concert / party / religious_activity 已从 massing 映射移出，
+  改指向 `concentration`，于是当前会被 `derive_events` 按 `enabled` 丢掉并打印。
+  **那是有意的** —— 比顶着「集结」这个错标签进训练集强。
 
 困难负样本的措辞按簇里的实际类别分情况（`meta.hard_negative_kind`）：
 
@@ -119,6 +188,10 @@ civil_cluster    → 未见异常。画面中虽有12辆车辆密集成簇、达
 
 ⚠️ 写死一套文案会出事：对一张满是军机的图说「均为民用目标，未见军机」是睁眼说
 瞎话，而且正好是 `qc_consistency` 会抓的那类自相矛盾。
+
+接线做完之后，这两句要改成「达到密集规模但非集结」的口径，并把航空器/舰船从
+massing/equipment 的 `target_classes` 里移除 —— 那时它们由正面标签承接，
+不再需要靠否定句表达。
 
 ### 坐标制式 —— 改错了整批框都是废的，而且不报错
 
@@ -174,44 +247,55 @@ Mendeley-UAV-Mil    3982     MAR20              3842    DOTA-v2.0          3181
 DroneCrowd          3176     ERA                2701    ERA-SingleFrames   2701
 ```
 
-各类事件产量（`data/all_ev.jsonl`）—— **三个类都有自由看图的实证背书**：
+各类事件产量（`data/all_ev.jsonl`）—— ⚠️ **这组数字是 v0.5.6 跑出来的，v1.0
+本体改了映射，必须重跑 `derive_events` 才作数**：
 
-| 类 | 事件数 | 来源 | 实证 |
-|---|---|---|---|
-| smoke | 12899 | FASDD_UAV | 自由看图 12/12 确认 |
-| explosion | 8259 | FASDD_UAV + ERA | 自由看图 12/12 确认 |
-| massing/personnel | 923 | **仅 ERA 游行/抗议/集会** | 真异常事件 |
-| massing/equipment | 84 | Mendeley 坦克簇 | 自由看图确认「纵队或楔形编队」 |
+| 类 | v0.5.6 事件数 | 来源 | 实证 | v1.0 变化 |
+|---|---|---|---|---|
+| smoke | 12899 | FASDD_UAV | 自由看图 12/12 确认 | 不变 |
+| explosion | 8259 | FASDD_UAV + ERA | 自由看图 12/12 确认 | 不变 |
+| disaster | 0（停用） | ERA | 真标注 | **恢复启用**，预计 ~1056 |
+| massing/personnel | 923 | ERA 游行/抗议/集会 | 真异常事件 | **会降** —— concert/party/<br>religious_activity 已移出 |
+| massing/equipment | 84 | Mendeley 坦克簇 | 自由看图确认「纵队或楔形编队」 | 不变 |
 
 **困难负样本 18878**（占正常样本 41.7%），其中 DroneCrowd 3176 + VisDrone 4045
-是按 `hard_negative_datasets` 转过来的。
-
-⚠️ **类间比例 12.9:1（smoke : massing），严重失衡。** `apply_quota` 现在会显眼
-报出来。要么给 massing 补数据源，要么对 smoke 主动下采样 —— **不要靠在 massing
-的同一批画面上反复出题来凑**，那是同质化不是数据量。
+是按 `hard_negative_datasets` 转过来的。这批在 `concentration` 接线后会改为
+正面标签。
 
 ⚠️ **ERA / ERA-SingleFrames 是同一批 2701 段素材的两种形态**，排配额时不能算两次。
 ERA-SF 的**目标框是 0**（ERA 本来没有 bbox），只能出描述题和判定题。
 
 ### ⛔ 未决问题
 
-1. **类间比例 12.9:1**（smoke 12899 : massing 1007）。补数据源还是下采样，待定。
-2. 各类都够不到 25000/类。**要接受还是补数据源的决策题。**
-   注意事件数 ≠ QA 条数：一个 scene 能出多道题，所以 QA 总量会高于事件数，
-   但类间比例基本由事件数决定。
-3. **单帧几何分不出车队和密集车流**（convoy 已因此停用）。
-4. **数据源层面的「类目错配」是最贵的一类错**，比阈值错贵得多：阈值能调，
+1. **类间比例严重失衡**（v0.5.6 实测 smoke 12899 : massing 1007 = 12.9:1，
+   清理 ERA 民事活动后只会更悬殊）。`apply_quota` 会显眼报出来。
+   补数据源和下采样**两者不冲突**，都要做 —— 但**不要靠在 massing 的同一批
+   画面上反复出题来凑**，那是同质化不是数据量。
+2. 各类都够不到 25000/类。**瓶颈是独立图数，不是 QA 条数**：
+   `QA = 独立图数 × 每图出题数`，只有前者携带视觉多样性。
+   `qa_per_image` 的健康区间是 3–8；massing 要凑 25000 需每图出题 27 次，
+   disaster 需 23.7 次 —— 落不进区间就是该补数据源的信号。
+3. **行为族 8 类目前全空**。单帧数据填不了「过程」。按 `docs/02_data_strategy.md`
+   的结论，唯一能系统性填上的路子是**仿真引擎**。
+4. **单帧几何分不出车队和密集车流**（`convoy` 已因此停用）。
+5. **数据源层面的「类目错配」是最贵的一类错**，比阈值错贵得多：阈值能调，
    数据里没有的现象调不出来。新接一个数据源时先问「它到底拍的是什么」，
    再问「这个现象在里面存在吗」——`convoy` / `border_crossing` /
-   `DroneCrowd 的 massing` 三次都栽在这里。
+   `DroneCrowd 的 massing` / `ERA 的演唱会` 四次都栽在这里。
 
 ### 📋 待办（按优先级）
 
-1. 跑通自由看图，看真实数据长什么样
-2. **同图事实卡**：一张图的所有数字来自同一份计算，从生成端根除数字打架
-3. describe prompt 里加 **GT 类别白名单**（防跨类污染）
-4. facet 按 MMAD 七类重排（会改写整个 `task_type`，要整体重跑）
-5. 规则侧短答案补理由从句；问法扩到每类 15–30 种
+1. **重跑 `derive_events`**，把 v1.0 本体下各类的真实产量统计出来
+   （massing 清理后还剩多少、disaster 恢复后有多少）
+2. **给 `concentration` 接线**：build_vqa 支持「有 concentration 事件时，
+   负样本答案改为『达到密集规模但非集结』」，然后把三个 concentration 的
+   `enabled` 改回 true，并把航空器/舰船从 massing/equipment 的
+   `target_classes` 移除
+3. **统计 DOTA 的 ship/harbor 按图分布**，确定 `sea_concentration` 的 status
+4. `concentration` / `disaster` 的 facet 与 prompt（`facets.EXPECTED` 要补两格）
+5. **同图事实卡**：一张图的所有数字来自同一份计算，从生成端根除数字打架
+6. describe prompt 里加 **GT 类别白名单**（防跨类污染）
+7. 规则侧短答案补理由从句；问法扩到每类 15–30 种
 
 ---
 

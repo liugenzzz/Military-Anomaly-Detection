@@ -25,9 +25,15 @@ IMG_EXT = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 # 目录名/原始标签 -> 本体事件 id。新增数据源时在这里加映射即可。
 LABEL_MAP = {
     "fire": "explosion", "explosion": "explosion", "arson": "explosion",
-    "riot": "crowd_gathering", "conflict": "crowd_gathering",
-    "parade": "crowd_gathering", "protest": "crowd_gathering", "party": "crowd_gathering",
-    "concert": "crowd_gathering", "religious_activity": "crowd_gathering",
+    # **右边必须是本体里真有的 class id。** 原来这七个都映射到 crowd_gathering,
+    # 而本体里从来没有这个 id —— 事件一路走到 build_vqa 才被发现叫不出中文名,
+    # 落成「存在异常, 为异常」和 `"label":"crowd_gathering区域"`。
+    # 口径与 ds/era.py 的 ANOMALY 保持一致(单一出口): 对抗性人群 -> 集结,
+    # 民事人群 -> 密集分布。
+    "riot": "massing", "conflict": "massing",
+    "parade": "massing", "protest": "massing",
+    "party": "concentration", "concert": "concentration",
+    "religious_activity": "concentration",
     "smoke": "smoke", "flame_and_smoke": "smoke",
     "constructing": "fortification",
     "non-event": "normal", "non_event": "normal", "normal": "normal", "neither": "normal",
