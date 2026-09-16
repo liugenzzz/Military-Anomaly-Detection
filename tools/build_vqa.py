@@ -457,8 +457,12 @@ class RuleBuilder:
     def _count_mode(self, s: Scene, cls: str, n: int) -> str:
         """exact = 给准数 / magnitude = 给量级 / none = 这题不出"""
         a = self._med_area(s, cls)
+        # **"太小"只否掉准数, 不该连量级一起否掉。**
+        # 原来 a < AREA_FLOOR 直接 return "none", 于是 DroneCrowd 那种一图上百个
+        # 人头点(每个只占画幅 0.012%)一道计数题都出不来 —— 可人群计数正是这个
+        # 数据集的本行, GT 极可靠, 问「大概多少人」完全成立, 只是不能问准数。
         if a < self.AREA_FLOOR:
-            return "none"
+            return "magnitude" if n > self.COUNT_EXACT_MAX else "none"
         if n <= self.COUNT_FEW:
             return "exact"
         if n <= self.COUNT_EXACT_MAX and a >= self.COUNT_MIN_AREA:
@@ -608,8 +612,15 @@ class RuleBuilder:
         cls, n = cc[0]
         mw, zh = MEASURE.get(cls, "个"), CLS_ZH.get(cls, cls)
         if self.rng.random() < 0.3:                       # 真陈述
-            claim = f"画面中有{n}{mw}{zh}"
-            return self._ask("correct", claim=claim), f"说法属实，画面中确为 {n} {mw}{zh}。"
+            # **数不清的场景不能给准数。** 这里原来直接写 f"{n}{mw}{zh}",
+            # 于是同一张 DroneCrowd 图上, 计数题答"数百名以上, 无法逐个点清",
+            # 纠错题却答"确为158名人员" —— 前脚说数不清后脚报准数。
+            # 数量措辞一律走 count_phrase(), 这是 CLAUDE.md 里的"单一出口"。
+            if not self._countable_exact(s, cls, n):
+                return None                   # 量级说法撑不起纠错题, 这题不出
+            what = self.count_phrase(s, cls, n)
+            return (self._ask("correct", claim=f"画面中有{what}"),
+                    f"说法属实，画面中确为{what}。")
         style = self.rng.random()
         if style < 0.5 and self._countable_exact(s, cls, n):   # 数量错(数得清才出)
             delta = self.rng.choice([-3, -2, -1, 1, 2, 3, 5])
@@ -744,9 +755,16 @@ class RuleBuilder:
             by[o.cls] = by.get(o.cls, 0) + 1
         cls, n = max(by.items(), key=lambda kv: kv[1]) if by else ("目标", 0)
         what = self.count_phrase(s, cls, n) if n else "若干目标"
+        # 和判定句同一个道理: 措辞要按困难负样本的种类来, 不能写死。
+        # 对一广场行人说"均为民用目标"是答非所问 —— 人本来就不分军民,
+        # 问题在于"这是日常人流不是聚集"; 对一片军机说这句话更是睁眼说瞎话。
+        tail = {
+            "ordinary_crowd": "，但这是公共场所的日常人流，分布松散，不属于需要上报的情况。",
+            "aircraft_parking": "，但它们停在固定机位上，属于机场的常规停放，不需要上报。",
+        }.get(s.meta.get("hard_negative_kind", "civil_cluster"),
+              "，但均为民用目标，不属于需要上报的情况。")
         return (self._ask("dense_region"),
-                f"{where}该区域聚集了{what}，密度明显高于画面其他部分，"
-                f"但均为民用目标，不属于需要上报的情况。")
+                f"{where}该区域聚集了{what}，密度明显高于画面其他部分{tail}")
 
     def why(self, s: Scene) -> str | None:
         """多轮里的第三轮"依据是什么"。只复述证据字段, 不做任何延伸判断。

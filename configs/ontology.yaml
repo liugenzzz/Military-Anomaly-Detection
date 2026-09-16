@@ -16,7 +16,7 @@
 #   - v0.2.1: 军用/民用目标分开命名(military-plane vs civil-plane),
 #     民用机场机群与民用港口因此成为困难负样本而非误标为集结
 
-version: "0.5.5"
+version: "0.5.6"
 box_scale: 1000                 # grounding 坐标归一化上限, Qwen-VL 系列用 1000
 negative_ratio_target: 0.30     # normal 样本占比下限
 qa_per_anomaly_target: 25000    # 每个异常类的 QA 条数目标
@@ -70,6 +70,21 @@ classes:
           # (最近邻距离试过, 两者 1.4~3.3 完全重叠, 没用。)
           min_core_neighbors: 3
           max_area_per_object: 20
+          # v0.5.6: **这两个数据源整体只做困难负样本, 不产出 massing 事件。**
+          # 定向复查(docs/16_free_look_massing_recheck.md, 15 张逐条核对)的结论:
+          # 11/15 是误报。标注 99 人的图模型说「没有看到明显的人群聚集」,
+          # 标注 169 人的说「绝对没有"密密麻麻一片"的情况」。
+          #
+          # 根因是**类目错配, 不是阈值**: DroneCrowd 是人群**计数**数据集,
+          # 拍的是广场、校园、路口、球场 —— 里面根本没有「异常聚集」这个现象。
+          # 从「校园广场上 117 个行人」提不出异常, 再准的密度判据也提不出。
+          # VisDrone 同理, 拍的是城市街景。
+          #
+          # 但这些图**没有浪费**, 反而各得其所:
+          #   · 困难负样本 —— 人很多却不是异常, 直接教模型别一看到人多就报警
+          #   · 计数题     —— DroneCrowd 本行就是人群计数, 素材质量极高
+          # 「异常聚集」现在只由 ERA 的游行/抗议/集会标签供给(真正的异常事件)。
+          hard_negative_datasets: ["DroneCrowd", "VisDrone2019-MOT", "VisDrone2019-DET"]
           # 补量用的放宽档。只在该类产量不够时由 derive_events --relax-below 启用,
           # 命中的事件打 relaxed 标记, 答案改用"小规模聚集"这类留有余地的说法,
           # 不会拿放宽出来的样本去冒充典型集结。

@@ -46,12 +46,19 @@ LABEL_RE = re.compile(r'"label"\s*:\s*"([^"]*)"')
 # 且前面挂着否定词的一律不算。compare 这类分区题直接整条跳过。
 TOTAL_RE = re.compile(r'(?:共|总共|一共|合计|数量是|数量为)\s*(?:观察到|检测到|有)?\s*(\d+)\s*(辆|人|名|架|艘|处|团|股|条|个)')
 UNIT_RE = re.compile(r'(\d+)\s*(辆|人|名|架|艘|处|团|股|条)')
-COUNT_Q_RE = re.compile(r'(多少|几辆|几人|几名|几架|几艘|几处|清点|数量|计数|总数)')
+# 计数问句。纠错题问的是「画面中有158名人员——这句话准确吗」, 不含"多少/清点",
+# 早先匹配不到, 于是那句准数没被当成全图总数, 矛盾就漏过去了。
+COUNT_Q_RE = re.compile(r'(多少|几辆|几人|几名|几架|几艘|几处|清点|数量|计数|总数|'
+                        r'准确吗|对不对|是否属实|这句话|错在哪|规模)')
 NEG_BEFORE_RE = re.compile(r'(不是|并非|而非|不足|没有|少于|多于|超过)$')
 REGION_TASKS = ("compare", "dense_region", "after_count")
 # 概数说法, 必须带单位才算 —— 光一个"若干"不知道说的是人还是车,
-# 拿它去和"3辆"比会把不相干的两句判成打架
-VAGUE_UNIT_RE = re.compile(r'(数十|十余|二三十|三四十|四五十|几十|十几|若干|数|多|少)\s*(辆|人|名|架|艘|处|团|股|条)')
+# 拿它去和"3辆"比会把不相干的两句判成打架。**「数百名」里的「数」和「名」中间隔着「百」** —— 早先写成
+# (数|多|少)\s*(单位) 就漏掉了这一整类, 于是同一张图上「数百名以上, 无法逐个
+# 点清」和「确为158名人员」并存, QC 一声没吭。数量词部分要允许中间夹位数。
+VAGUE_UNIT_RE = re.compile(
+    r'(数十|十余|二三十|三四十|四五十|几十|十几|若干|数百|上百|成百|数千|上千|'
+    r'成千|数万|大量|不少|许多|众多|数|多|少)[百千万余多]{0,2}\s*(辆|人|名|架|艘|处|团|股|条)')
 UNIT_ALIAS = {"名": "人"}                      # 26 名 == 26 人, 同一口径
 
 # 计数必须绑到**主语**, 光看量词会把「3辆车」和「0辆坦克」判成打架 ——
@@ -72,6 +79,8 @@ def subject_of(*texts: str) -> str | None:
             if w in t:
                 return SUBJECT_ALIAS.get(w, w)
     return None
+
+
 # 断言异常的措辞。正常图/难负样本里出现即为自相矛盾。
 # **必须按句子判, 并且看否定词。** 光匹配一个"车队"会把
 # 「否，未观察到车队机动的迹象。」也判成断言 —— 那恰恰是正确答案。
@@ -257,12 +266,16 @@ def check(rows: list[dict[str, Any]], scale_default: int,
                 for unit, num in totals_in(q, a):
                     counts_by_img[img_id][unit].add(num)
                     sample_of_img_count.setdefault((img_id, unit, num), sid)
-            for m in VAGUE_UNIT_RE.finditer(ans):
-                # 概数就近取主语: 「若干人员」里的主语紧跟在概数后面
-                subj = subject_of(ans[m.start():m.start() + 16]) or subject_of(ans)
-                if subj:
-                    vague_by_img[img_id].add(
-                        (f"{subj}/{UNIT_ALIAS.get(m.group(2), m.group(2))}", sid))
+                # **概数也要按问答对看, 而且主语可能只在问句里。**
+                # 「人员的聚集规模大概多大？」/「数百名以上, 无法逐个点清」——
+                # 答句里一个"人"字都没有, 只在问句里。早先只扫答句, 于是这一条
+                # 拿不到主语被跳过, 同图的"确为158名人员"就没人跟它对质。
+                for m in VAGUE_UNIT_RE.finditer(a):
+                    subj = (subject_of(a[m.start():m.start() + 16])
+                            or subject_of(a) or subject_of(q))
+                    if subj:
+                        vague_by_img[img_id].add(
+                            (f"{subj}/{UNIT_ALIAS.get(m.group(2), m.group(2))}", sid))
 
     # --- 6) 同图数字自相矛盾 ---
     for img_id, per_unit in counts_by_img.items():

@@ -93,6 +93,13 @@ DIRTY = [
         anomaly=[], task_type="judge"),
     row("d_plain", "D_2", [("有问题吗？", "画面中存在人员异常聚集，规模约三十人。")],
         anomaly=[], task_type="judge"),
+    # 「数百名」里的「数」和「名」中间隔着「百」，早先的概数正则漏掉这一整类；
+    # 纠错题的问句「这句话准确吗」也不在计数问句词表里 —— 两边都漏，于是同一张图
+    # 上「数百名以上，无法逐个点清」和「确为158名人员」并存，QC 一声没吭。
+    row("d_cnt1", "D_3", [("人员的聚集规模大概多大？", "数百名以上，密集成片，无法逐个点清。")],
+        task_type="count"),
+    row("d_cnt2", "D_3", [("画面中有158名人员——这句话准确吗？", "说法属实，画面中确为158名人员。")],
+        task_type="correct"),
 ]
 
 EXPECTED = {
@@ -108,9 +115,15 @@ if __name__ == "__main__":
     from qc_consistency import check
     got = {f.kind for f in check(rows, 1000, 3, 12)}
     noise = check(CLEAN, 1000, 3, 12)
-    missed = [r["id"] for r in DIRTY
+    # 单条就能判的那几个, 逐条查; 需要跨条比对的(同图数字打架)整组一起查。
+    solo = [r for r in DIRTY if not r["id"].startswith("d_cnt")]
+    pair = [r for r in DIRTY if r["id"].startswith("d_cnt")]
+    missed = [r["id"] for r in solo
               if r["id"] not in {f.sample_id for f in check([r], 1000, 3, 12)
                                  if f.kind == "normal_but_asserts_anomaly"}]
+    if pair and not [f for f in check(pair, 1000, 3, 12)
+                     if f.kind == "exact_vs_vague_same_image"]:
+        missed.append("d_cnt(同图既报准数又说数不清)")
     missing, extra = EXPECTED - got, got - EXPECTED
     for k in sorted(EXPECTED | got):
         print(f"  {'✓' if k in got else '✗'} {k}")
