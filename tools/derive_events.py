@@ -160,8 +160,22 @@ def derive_density_cluster(scene: Scene, rule: dict[str, Any], cls_id: str,
             REJECTS[cls_id]["不含军事目标(require_any)"] += 1
             if on_fail == "hard_negative":
                 scene.meta["hard_negative"] = True
+                # **措辞必须按簇里到底是什么来定。** 写死"不含军事目标"的话,
+                # 一片停机坪上的军机会被描述成"均为民用目标, 未见军机" —— 那是
+                # 睁眼说瞎话, 而且正好是 qc_consistency 会抓的那类自相矛盾。
+                air = {"military-plane", "civil-plane", "military-helicopter",
+                       "civil-helicopter"}
+                n_air = sum(1 for i in group if objs[i].cls.lower() in air)
+                if n_air >= max(1, len(group) // 2):
+                    why = (f"{len(group)} 架航空器密集停放, 是机场/停机坪的常态, "
+                           f"不是地面力量向某处汇聚的集结")
+                    kind = "aircraft_parking"
+                else:
+                    why = f"{len(group)} 个目标密集成簇, 但不含地面军事装备"
+                    kind = "civil_cluster"
                 scene.meta.setdefault("hard_negative_reason", []).append(
-                    f"{cls_id}/{subtype or '-'}: {len(group)} 个目标密集成簇但不含军事目标")
+                    f"{cls_id}/{subtype or '-'}: {why}")
+                scene.meta.setdefault("hard_negative_kind", kind)
                 # 把"像但不是"的那块区域记下来。困难负样本没有事件, 下游算不出区域框,
                 # 而这块区域正是它最有价值的部分 —— 描述题要讲清"密在哪、为什么不算",
                 # 定位题要能问"目标最密的一片在哪"(但绝不能问成"异常在哪")。

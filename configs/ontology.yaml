@@ -16,7 +16,7 @@
 #   - v0.2.1: 军用/民用目标分开命名(military-plane vs civil-plane),
 #     民用机场机群与民用港口因此成为困难负样本而非误标为集结
 
-version: "0.5.4"
+version: "0.5.5"
 box_scale: 1000                 # grounding 坐标归一化上限, Qwen-VL 系列用 1000
 negative_ratio_target: 0.30     # normal 样本占比下限
 qa_per_anomaly_target: 25000    # 每个异常类的 QA 条数目标
@@ -83,29 +83,50 @@ classes:
         zh: 装备集结
         rule:
           kind: density_cluster
+          # v0.5.5: **航空器整体移出这一类。**
+          # 「集结」说的是地面力量向某处汇聚这个**动作**；停机坪上停着的飞机是
+          # 机场的常态，是静态事实。自由看图里模型对 MAR20 的原话就是
+          #   「机场停机坪，飞机静止停放，排列整齐」
+          #   「所有飞机均处于静止停放状态…没有看到烟、火、人群或移动的车队」
+          # 把它训成「异常聚集」，等于教模型看见任何一个军用机场都报异常。
+          #
+          # 代价说清楚: MAR20 的 3842 张(全是 military-plane)不再产生 massing 事件,
+          # massing/equipment 会大幅缩水，基本只剩 Mendeley 的坦克簇。
+          # **但 MAR20 本身没有浪费** —— 它照样是:
+          #   · 正常/负样本(军用机场的日常态势)
+          #   · 计数题、描述题、带框定位题的优质素材(军机识别)
+          # 只是不该顶着「异常聚集」这个标签。
+          #
+          # 舰船同理留着 warship: 军舰成群停泊仍算集结, 民用港口由 require_any 挡掉。
+          #
+          # **航空器仍留在 target_classes 里, 但从 require_any 里拿掉。**
+          # 这样一片停机坪照样会聚成簇, 然后因为不含地面军事装备落进
+          # on_require_fail: hard_negative —— 正是我们想要的:
+          # 「看着像集结(一堆军用装备聚在一起)但不是」恰恰是最有价值的困难负样本,
+          # 直接教模型分清「密集停放」与「集结」。
+          # 移出 target_classes 的话这批图会变成平平无奇的正常样本, 白白浪费。
           target_classes: ["vehicle", "large-vehicle", "truck", "car", "tank",
                            "military-vehicle", "military-truck", "armored",
                            "civil-plane", "military-plane", "civil-helicopter",
                            "military-helicopter", "ship", "warship"]
-          # 阈值按军事装备的规模定, 不按民用停车场。MAR20 平均 5.8 架/图,
-          # 取 8 会滤掉约六成图; 5 件军事装备集中停放已构成集结。
-          # 民用目标由 require_any 排除, 不靠数量阈值把关。
+          # 阈值按地面装备的规模定, 不按民用停车场。
+          # 5 件军事装备集中停放已构成集结; 民用目标由 require_any 排除,
+          # 不靠数量阈值把关。
           min_cluster_size: 5
           eps_ratio: 0.06
           eps_obj_mult: 3.0        # 同上; DOTA 切片后图像变小, 只按对角线取会漏判
-          # 装备类目标大、间距相对身长小(停机坪上飞机间距约 2-3 倍机身),
-          # 所以密度门槛可以比人员松, 核心点要求也低一档(装备本来就少)。
+          # 装备类目标大、间距相对车长小, 所以密度门槛可以比人员松,
+          # 核心点要求也低一档(装备本来就少)。
           min_core_neighbors: 2
           max_area_per_object: 12
           relax:
             min_cluster_size: 3    # 3 件军事装备集中停放, 只能说"小规模集结迹象"
             eps_ratio: 0.08
             eps_obj_mult: 4.0
-          # 军用与民用必须分开命名。MAR20 的飞机全是军机, DOTA 的 plane 含民航客机;
-          # 若都叫 plane, 民用机场停机坪会被判成装备集结。同理 DOTA 的 ship
-          # 多为民用港口, 只有 warship 才计入。
+          # 军用与民用必须分开命名。DOTA 的 ship 多为民用港口, 只有 warship 才计入。
+          # (航空器已整体移出这一类, 见上。)
           require_any: ["tank", "military-vehicle", "military-truck", "armored",
-                        "military-plane", "military-helicopter", "warship"]
+                        "warship"]
           on_require_fail: hard_negative
 
   - id: explosion
@@ -189,7 +210,23 @@ classes:
 
   - id: convoy
     zh: 车队机动
-    enabled: true
+    enabled: false
+    # v0.5.5 停用。**理由是自由看图的实证，不是规则写得不对。**
+    # 让模型无约束描述 12 张被判为 convoy 的图，7 张的原话是
+    #   「车辆均为静止停放状态，没有形成车队或拥堵」
+    #   「车辆分布较为稀疏，没有形成拥堵的车队」
+    #   「停放着多辆汽车…排列相对整齐」
+    # 603 条里多半是路边停车和停车场的一排车。
+    #
+    # 几何上也早就量明白了（见 tests/convoy_fixture.py 的 docstring）：
+    # 停车场的一排车本身就是共线 + 等距 + 细长，单帧里和车队没有区别。
+    # 40 辆随机散车能凑出比真车队还整齐的"队列"（CV 0.077 vs 0.156）。
+    # 和 border_crossing 是同一类问题：单帧看不到运动。
+    #
+    # 规则、prompt、对照测试全部原样留着。要重新启用，得先有：
+    #   · 多帧素材（看得到车在动），或
+    #   · 含真实军用车队的数据源
+    # 改回 enabled: true 即可，tests/convoy_fixture.py 会自动把它打开来测。
     # v0.5.0 启用。当初停用的理由是"与正常道路交通无法可靠区分" —— 那是因为
     # 判据只有"共线 + 数量", 而正常车流同样共线。补上三条才分得开:
     #   间距均匀(车队保队形, 车流忽快忽慢)、车型一致(车队同型, 车流混杂)、

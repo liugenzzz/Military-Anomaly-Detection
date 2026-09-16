@@ -83,6 +83,14 @@ def main() -> int:
     onto = yaml.safe_load(
         (Path(__file__).resolve().parent.parent / "configs/ontology.yaml")
         .read_text(encoding="utf-8"))
+    # **在副本里强制打开 convoy。** 这个类当前是停用的(v0.5.5, 理由见 ontology),
+    # 但停用是"数据上分不出来", 不是"规则写错了" —— 规则逻辑仍然要一直可测,
+    # 否则将来拿到多帧素材想重新启用时, 没有任何东西能证明它还是对的。
+    off = [c for c in onto["classes"] if c["id"] == "convoy" and not c.get("enabled", True)]
+    for c in off:
+        c["enabled"] = True
+    if off:
+        print("  (convoy 在本体里是停用状态, 测试副本里强制打开以验证规则逻辑)\n")
     fail = []
     for sc, want, why in CASES:
         derive([sc], onto, overwrite=True)

@@ -360,8 +360,27 @@ class RuleBuilder:
                 by[o.cls] = by.get(o.cls, 0) + 1
             cls, n = max(by.items(), key=lambda kv: kv[1]) if by else ("目标", 0)
             what = self.count_phrase(s, cls, n) if n else "若干目标"
-            a = (f"未见异常。画面中虽有{what}密集成簇、达到了集结的规模条件，"
-                 f"但均为民用目标，未见坦克、装甲车或军机等军事装备，属于正常场景。")
+            # **困难负样本"为什么不算异常"要分情况说。**
+            # 写死"均为民用目标, 未见军机"的话, 一片停机坪上的军机会被这么描述 ——
+            # 那是睁眼说瞎话。derive_events 已经按簇里的实际类别记了 kind,
+            # 这里照着说, 不要自己猜。
+            kind = s.meta.get("hard_negative_kind", "civil_cluster")
+            if kind == "aircraft_parking":
+                a = self.rng.choice([
+                    f"未见异常。画面中虽有{what}集中停放，但这是机场停机坪的常态，"
+                    f"航空器均处于静止停放状态，没有向某处汇聚的迹象，属于正常场景。",
+                    f"未见异常。{what}排列整齐地停在停机坪上，属于日常停放，"
+                    f"不构成兵力或装备的集结。",
+                    f"未见异常。画面里确实有{what}密集分布，但它们停在固定机位上，"
+                    f"这是机场的常规状态，不是异常聚集。",
+                ])
+            else:
+                a = self.rng.choice([
+                    f"未见异常。画面中虽有{what}密集成簇、达到了集结的规模条件，"
+                    f"但均为民用目标，未见坦克、装甲车等军事装备，属于正常场景。",
+                    f"未见异常。{what}聚在一起，规模看着够，但都是民用车辆，"
+                    f"不构成装备集结。",
+                ])
         else:
             a = self.rng.choice([
                 "未见异常。目标分布稀疏，无烟火迹象，也没有成队行进的车辆。",
