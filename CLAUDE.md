@@ -109,23 +109,36 @@
 | 数据体检 | `tools/inspect_data.py` | 标注统计 + VLM 自由看图 |
 | 回归测试 | `tests/*.py` | qc_fixture / merge_fixture |
 
-### 语料现状（2026-09，DroneCrowd 修好后）
+### 语料现状（2026-09-16，全量 derive 之后）
+
+**56898 个 scene / 8 个数据源**（`data/all.jsonl`）：
 
 ```
-FASDD_UAV          25097     smoke 12899 / explosion 8031
-VisDrone2019-MOT    6786+    含 testdev（早先被误跳，已修）
-VisDrone2019-DET    6471
-Mendeley-UAV-Mil    3982     tank 6364 / soldier 3437
-MAR20               3842     massing 2930
-DOTA-v2.0           3181     全部是困难负样本（无军事类目标，按设计）
-DroneCrowd          3176     467741 个人头框，massing 4983 事件
-ERA / ERA-SF        2173×2   同一批素材的两种形态，**排配额时不能算两次**
+FASDD_UAV          25097     VisDrone2019-MOT   8448    VisDrone2019-DET   6471
+Mendeley-UAV-Mil    3982     MAR20              3842    DOTA-v2.0          3181
+DroneCrowd          3176     ERA                2701
 ```
+
+各类事件产量（`data/all_ev.jsonl`）：
+
+| 类 | 事件数 | 距 25000/类 |
+|---|---|---|
+| smoke | 12899 | 52% |
+| explosion | 8145 | 33% |
+| massing（personnel 6034 + equipment 1830） | 7864 | 31% |
+| convoy | 603 | 2.4% ← 几何硬限制，见「未决问题 3」 |
+
+无事件 37878 条，其中**困难负样本 13147**（占正常样本 34.7%，达标 ≥30%）。
+
+⚠️ **ERA-SingleFrames 这次没进来**（上一版有 1117 条）。`prepare.py era` 默认只产
+视频模态，单帧要单独开关 —— 那是 image 模态的语料，待确认是否要补。
 
 ### ⛔ 未决问题
 
 1. **自由看图（`vlm_free_look.md`）还没成功产出过。** 它决定后面的问法设计。
-2. 集结 ~8000 / 爆炸 ~8100 / 烟雾 ~12900，**都够不到 25000/类的目标**。
+2. 四个类都够不到 25000/类的目标（见上表）。**这是要接受还是要补数据源的决策题。**
+   注意事件数 ≠ QA 条数：一个 scene 能出多道题，所以 QA 总量会高于事件数，
+   但类间比例基本由事件数决定。
 3. **convoy 注定低产（几十到几百量级），这是几何上的硬限制，不是调参问题。**
    实测量过：40 辆随机散车能凑出比真车队还整齐的"队列"（CV 0.077 vs 0.156）；
    80 辆以上时随机线的间距能压到 0.8 车长，比任何真车队都紧。停车场的一排车

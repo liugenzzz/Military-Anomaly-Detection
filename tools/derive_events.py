@@ -86,7 +86,7 @@ def derive_density_cluster(scene: Scene, rule: dict[str, Any], cls_id: str,
     objs = scene.of_classes(targets)
     if len(objs) < rule["min_cluster_size"]:
         return _veto(cls_id, "数据源无此类目标" if not objs
-                     else f"目标数不足({len(objs)}<{rule['min_cluster_size']})")
+                     else f"目标数不足(<{rule['min_cluster_size']})")
 
     # 交通否决: 同框有成规模的车辆/摩托 -> 这是城市街景的人流, 不是聚集
     veto_cls = {c.lower() for c in rule.get("traffic_veto_classes", [])}
@@ -197,9 +197,16 @@ def reject_report() -> str:
     if not REJECTS:
         return ""
     out = ["\n候选为什么没成事件(按类):"]
+    TOP = 8
     for cls_id in sorted(REJECTS):
         items = REJECTS[cls_id].most_common()
-        out.append(f"  {cls_id}: " + ", ".join(f"{k} {v}" for k, v in items))
+        shown = ", ".join(f"{k} {v}" for k, v in items[:TOP])
+        rest = items[TOP:]
+        out.append(f"  {cls_id}: {shown}")
+        if rest:
+            # 兜底: 原因里万一又混进了自由变化的数值, 这里保证报告不会被刷屏
+            out.append(f"    (其余 {len(rest)} 种原因共 {sum(v for _, v in rest)} 次, "
+                       f"占比不足前八之末)")
     out.append("  ↑ 「数据源无此类目标」= 这批数据压根不含该规则要的标注, "
                "正常, 不用管;")
     out.append("    「不含军事目标」占多数 = 队形/规模都够, 只差 require_any, "
@@ -228,7 +235,7 @@ def derive_linear_formation(scene: Scene, rule: dict[str, Any], cls_id: str,
         # DroneCrowd 只有人头点, 没有车), 属于"本来就轮不到这条规则", 不是被否决;
         # 混在一起报会把真正该看的信号淹掉。
         return _veto(cls_id, "数据源无此类目标" if not all_objs
-                     else f"目标数不足({len(all_objs)}<{rule['min_count']})")
+                     else f"目标数不足(<{rule['min_count']})")
 
     # **找共线的子集, 不是要求全图共线。** 这是这条规则最早的致命缺陷:
     # 原来对画面里所有车一起算 R², 于是一支七辆车的车队旁边只要有十辆散车,
@@ -395,7 +402,11 @@ def _check_column(scene: Scene, objs: list[Obj], rule: dict[str, Any],
     car = sizes[len(sizes) // 2] or 1.0
     gap_mult = mean_gap / car
     if gap_mult > float(rule.get("max_gap_obj_mult", 5.0)):
-        _veto(cls_id, f"间距过大({gap_mult:.1f}倍车身, 是散布不是车队)")
+        # 分桶, 不要把精确倍数写进原因。**这个错我犯过两次**: 原因里嵌一个自由
+        # 变化的数, 记账就会按每个取值各占一行, 一份报告里冒出六十多行同一类
+        # 否决, 真正该看的信号全被淹掉。
+        b = ("略偏大" if gap_mult < 5 else "明显偏大" if gap_mult < 8 else "远超")
+        _veto(cls_id, f"间距{b}({rule.get('max_gap_obj_mult', 5.0)}倍车身以上, 是散布不是车队)")
         return None
 
     # 细长度: 沿主轴的跨度 / 垂直方向的跨度
