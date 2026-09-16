@@ -142,6 +142,40 @@ def report(stats: dict) -> str:
     return "\n".join(out)
 
 
+def apply_filters(scenes: list[Scene], only_class, only_dataset) -> list[Scene]:
+    """定向复查用的过滤。
+
+    改完判定规则之后要拿**同一批**素材再看一次模型怎么说, 全类均匀抽样做不到
+    —— 想复查 DroneCrowd 的 massing, 抽出来的十二张里只有两三张是它。
+    这是"改规则 -> 看模型还说不说稀疏"这个闭环的必要一环。
+
+    **过滤要在最前面做**, 标注统计也跟着一起过滤。早先我把它放在
+    `--per-class` 的提前返回之后, 于是不加那个参数时过滤根本不执行,
+    "过滤到空"也不报错 —— 又一个静默降级。
+    """
+    out = scenes
+    if only_class:
+        want = set(only_class)
+        out = [s for s in out
+               if want & set(s.anomaly_types or ["normal"])
+               or want & {e.type for e in s.events}
+               or want & {f"{e.type}/{e.evidence.get('subtype')}"
+                          for e in s.events if e.evidence.get("subtype")}]
+    if only_dataset:
+        want = set(only_dataset)
+        out = [s for s in out if s.source_dataset in want]
+    if (only_class or only_dataset) and not out:
+        raise SystemExit(
+            f"过滤后一个 scene 都不剩。\n"
+            f"  --only-class {only_class or '(未指定)'}   "
+            f"--only-dataset {only_dataset or '(未指定)'}\n"
+            f"  可选的数据源: {sorted({s.source_dataset for s in scenes})[:12]}\n"
+            f"  可选的类别:   {sorted({e.type for s in scenes for e in s.events})}")
+    if out is not scenes:
+        print(f"过滤后 {len(out)}/{len(scenes)} 个 scene（--only-class / --only-dataset）\n")
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="数据体检: 标注统计 + VLM 自由描述抽样图")
     ap.add_argument("--scenes", required=True)
@@ -159,12 +193,17 @@ def main() -> None:
                     action="store_true", default=None)
     ap.add_argument("--no-inline-images", dest="inline_images", action="store_false",
                     help="改用 file:// 让推理机自己读盘(需要 --allowed-local-media-path)")
+    ap.add_argument("--only-class", nargs="*", default=None,
+                    help="只看这些异常类(可写 massing 或 massing/personnel)。"
+                         "改完判定规则之后定向复查用")
+    ap.add_argument("--only-dataset", nargs="*", default=None,
+                    help="只看这些数据源, 如 DroneCrowd VisDrone2019-MOT")
     ap.add_argument("--ontology", default="configs/ontology.yaml",
                     help="用来核对「启用了但一条都没触发」的类")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    scenes = load_scenes(args.scenes)
+    scenes = apply_filters(load_scenes(args.scenes), args.only_class, args.only_dataset)
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     onto = None

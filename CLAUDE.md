@@ -109,29 +109,29 @@
 | 数据体检 | `tools/inspect_data.py` | 标注统计 + VLM 自由看图 |
 | 回归测试 | `tests/*.py` | qc_fixture / merge_fixture |
 
-### 语料现状（2026-09-16，全量 derive 之后）
+### 语料现状（2026-09-16，ERA 单帧补齐 + massing 密度修复之后）
 
-**56898 个 scene / 8 个数据源**（`data/all.jsonl`）：
+**59599 个 scene / 9 个数据源**（`data/all.jsonl`）：
 
 ```
 FASDD_UAV          25097     VisDrone2019-MOT   8448    VisDrone2019-DET   6471
 Mendeley-UAV-Mil    3982     MAR20              3842    DOTA-v2.0          3181
-DroneCrowd          3176     ERA                2701
+DroneCrowd          3176     ERA                2701    ERA-SingleFrames   2701
 ```
 
 各类事件产量（`data/all_ev.jsonl`）：
 
-| 类 | 事件数 | 距 25000/类 |
-|---|---|---|
-| smoke | 12899 | 52% |
-| explosion | 8145 | 33% |
-| massing（personnel 6034 + equipment 1830） | 7864 | 31% |
-| convoy | 603 | 2.4% ← 几何硬限制，见「未决问题 3」 |
+| 类 | 事件数 | 距 25000/类 | 备注 |
+|---|---|---|---|
+| smoke | 12899 | 52% | 自由看图 12/12 确认 |
+| explosion | 8259 | 33% | 自由看图 12/12 确认 |
+| massing（personnel 6224 + equipment 1829） | 8053 | 32% | v0.5.4 密度闸砍掉 780 条 |
+| convoy | 603 | 2.4% | **自由看图 12 张里 7 张模型说是「静止停放」** |
 
-无事件 37878 条，其中**困难负样本 13147**（占正常样本 34.7%，达标 ≥30%）。
+困难负样本占正常样本 **32.3%**（达标 ≥30%）。
 
-⚠️ **ERA-SingleFrames 这次没进来**（上一版有 1117 条）。`prepare.py era` 默认只产
-视频模态，单帧要单独开关 —— 那是 image 模态的语料，待确认是否要补。
+⚠️ **ERA / ERA-SingleFrames 是同一批 2701 段素材的两种形态**，排配额时不能算两次。
+ERA-SF 的**目标框是 0**（ERA 本来没有 bbox），只能出描述题和判定题。
 
 ### ⛔ 未决问题
 
@@ -141,7 +141,18 @@ DroneCrowd          3176     ERA                2701
    - `convoy` 12 张里 7 张模型说是「静止停放」「没有形成车队」→ **路边停车被判成车队**
    - `massing` 的 DroneCrowd 样本标注有 158/175 个人头，模型原话是
      「呈散点状分布，并非密集拥挤」「人群非常稀疏」
-   massing 的根因已定位并修复（v0.5.4，见下）；**convoy 待决策：建议停用**。
+   massing 的根因已定位并修复（v0.5.4）；**convoy 待决策：建议停用**。
+
+   **但 massing 的修复效果没验证过。** 密度闸只砍掉 780 条，DroneCrowd 原本
+   4983 条只掉了 15%，比预期少。可能真实人群确实有局部聚集，也可能阈值还不够 ——
+   **在这里判断不了，必须拿修过的样本再跑一次自由看图**：
+
+   ```bash
+   python tools/inspect_data.py --scenes data/all_ev.jsonl --out-dir data/inspect_massing \
+       --only-class massing --only-dataset DroneCrowd VisDrone2019-MOT --per-class 15
+   ```
+   看模型还说不说「稀疏」「并非密集」。这个「改规则 → 复查 → 再改」的闭环
+   比任何阈值调参都可靠。
 2. 四个类都够不到 25000/类的目标（见上表）。**这是要接受还是要补数据源的决策题。**
    注意事件数 ≠ QA 条数：一个 scene 能出多道题，所以 QA 总量会高于事件数，
    但类间比例基本由事件数决定。
