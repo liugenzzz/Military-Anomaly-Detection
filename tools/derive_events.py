@@ -111,6 +111,26 @@ def derive_density_cluster(scene: Scene, rule: dict[str, Any], cls_id: str,
         return _veto(cls_id, "数据源无此类目标" if not objs
                      else f"目标数不足(<{rule['min_cluster_size']})")
 
+    # **某些数据源整体不该产出这一类, 只该当困难负样本。**
+    # 不是阈值调不准, 是数据里根本没有这个现象 —— DroneCrowd 是人群**计数**
+    # 数据集, 拍的是广场、校园、路口、球场。自由看图里 15 张有 11 张模型的原话是
+    # 「零散分布」「非密集聚集」, 其中一张标注 99 人而模型说「没有看到明显的
+    # 人群聚集」。从"校园广场上 117 个行人"里提不出"异常聚集", 再准的密度判据
+    # 也提不出。
+    # 但这些图**不该浪费**: 人很多却不是异常, 正是最好的困难负样本 ——
+    # 直接教模型别一看到人多就报警。
+    if scene.source_dataset in set(rule.get("hard_negative_datasets", [])):
+        cs = [o.center for o in objs]
+        scene.meta["hard_negative"] = True
+        scene.meta.setdefault("hard_negative_kind", "ordinary_crowd")
+        scene.meta.setdefault("hard_negative_reason", []).append(
+            f"{cls_id}/{subtype or '-'}: 画面里有 {len(objs)} 个目标, 数量可观, "
+            f"但{scene.source_dataset}拍的是公共场所的日常人流, 不构成异常聚集")
+        scene.meta.setdefault("hard_negative_bbox",
+                              [min(c[0] for c in cs), min(c[1] for c in cs),
+                               max(c[0] for c in cs), max(c[1] for c in cs)])
+        return _veto(cls_id, f"{scene.source_dataset} 按配置只做困难负样本")
+
     # 交通否决: 同框有成规模的车辆/摩托 -> 这是城市街景的人流, 不是聚集
     veto_cls = {c.lower() for c in rule.get("traffic_veto_classes", [])}
     if veto_cls:

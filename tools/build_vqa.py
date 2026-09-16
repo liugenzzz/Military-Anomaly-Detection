@@ -365,7 +365,16 @@ class RuleBuilder:
             # 那是睁眼说瞎话。derive_events 已经按簇里的实际类别记了 kind,
             # 这里照着说, 不要自己猜。
             kind = s.meta.get("hard_negative_kind", "civil_cluster")
-            if kind == "aircraft_parking":
+            if kind == "ordinary_crowd":
+                a = self.rng.choice([
+                    f"未见异常。画面里确实有{what}，数量不少，但这是广场、道路一类"
+                    f"公共场所的日常人流，分布松散，不构成异常聚集。",
+                    f"未见异常。{what}分散在开阔场地上活动，属于正常的公共活动，"
+                    f"没有向某一点集中的迹象。",
+                    f"未见异常。人数虽多，但{what}三三两两地走动停留，"
+                    f"并非成规模地聚在一处。",
+                ])
+            elif kind == "aircraft_parking":
                 a = self.rng.choice([
                     f"未见异常。画面中虽有{what}集中停放，但这是机场停机坪的常态，"
                     f"航空器均处于静止停放状态，没有向某处汇聚的迹象，属于正常场景。",
