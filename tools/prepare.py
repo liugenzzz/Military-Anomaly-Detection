@@ -93,8 +93,14 @@ def main() -> None:
     p.add_argument("--n-frames", type=int, default=3)
     p.add_argument("--capera", default=None, help="CapERA caption json")
     p.add_argument("--no-normal", action="store_true", help="不采集正常类别")
-    p.add_argument("--single-frames", action="store_true",
-                   help="同时采集官方 SingleFrames/ 单帧分类数据(与视频样本互补)")
+    # **盘上有 SingleFrames/ 就默认采。** 早先默认关, 于是 1117 条单帧语料被静默
+    # 漏掉, 一直到对比两次产出的数据源列表才发现 —— 这正是"失败要响"要防的事:
+    # 数据明明在盘上, 不采就该说一声。不想要就显式 --no-single-frames。
+    p.add_argument("--single-frames", dest="single_frames",
+                   action="store_true", default=None,
+                   help="采集官方 SingleFrames/ 单帧分类数据(默认: 目录存在就采)")
+    p.add_argument("--no-single-frames", dest="single_frames", action="store_false",
+                   help="只要视频, 不采单帧")
     p.add_argument("--view", default="uav")
     add_out(p)
 
@@ -184,9 +190,18 @@ def main() -> None:
     elif a.cmd == "era":
         scenes = era.build(a.root, a.frames_dir, a.n_frames, a.capera, a.view,
                            include_normal=not a.no_normal, modality=a.modality)
-        if a.single_frames:
-            scenes += era.build_single_frames(a.root, a.view,
-                                              include_normal=not a.no_normal)
+        has_sf = (Path(a.root) / "SingleFrames").is_dir()
+        want_sf = has_sf if a.single_frames is None else a.single_frames
+        if want_sf:
+            sf = era.build_single_frames(a.root, a.view, include_normal=not a.no_normal)
+            if not sf and a.single_frames:
+                raise SystemExit(
+                    f"--single-frames 指定了, 但在 {a.root} 下没读到任何单帧。\n"
+                    f"  官方形态是 <root>/SingleFrames/<划分>/<类别>/*.jpg")
+            scenes += sf
+        elif has_sf:
+            print("[ERA] 跳过 SingleFrames/(--no-single-frames), "
+                  "少了这部分 image 模态语料")
     elif a.cmd == "dronecrowd":
         scenes = dronecrowd.build(a.root, a.ann_dir, a.stride, a.head_half, a.view)
     elif a.cmd == "visdrone-det":

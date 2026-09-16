@@ -23,8 +23,18 @@ from scene import Event, Obj, Scene, dump_scenes, load_scenes
 
 
 # ---------------------------------------------------------------- 聚类
-def _union_find_cluster(points: list[tuple[float, float]], eps: float) -> list[list[int]]:
-    """单链接聚类: 距离 < eps 的点连通。点数不大(<数千), O(n^2) 足够。"""
+def _union_find_cluster(points: list[tuple[float, float]], eps: float,
+                        min_core: int = 0) -> list[list[int]]:
+    """距离 < eps 的点连通。点数不大(<数千), O(n^2) 足够。
+
+    min_core 就是 DBSCAN 的 minPts: 只有邻居数 >= min_core 的"核心点"才能把两
+    团连起来, 非核心点只能挂靠在核心点上。**这一条是为了对付链式效应。**
+
+    纯单链接(min_core=0)等价于 minPts=1, 最容易串联: 一广场零散行人只要首尾
+    相接就会被串成一个大簇。实测 1920x1080 里 158 人均匀散布(绝不是聚集),
+    单链接照样聚出 20 人的簇, 刚好撞上 min_cluster_size 的门槛 —— 而自由看图里
+    模型对这些图的原话是"呈散点状分布, 并非密集拥挤"。
+    """
     n = len(points)
     parent = list(range(n))
 
@@ -40,12 +50,25 @@ def _union_find_cluster(points: list[tuple[float, float]], eps: float) -> list[l
             parent[rb] = ra
 
     eps2 = eps * eps
+    neigh = [0] * n
+    if min_core:
+        for i in range(n):
+            xi, yi = points[i]
+            for j in range(i + 1, n):
+                xj, yj = points[j]
+                if (xi - xj) ** 2 + (yi - yj) ** 2 < eps2:
+                    neigh[i] += 1
+                    neigh[j] += 1
+    core = [True] * n if not min_core else [c >= min_core for c in neigh]
     for i in range(n):
         xi, yi = points[i]
         for j in range(i + 1, n):
             xj, yj = points[j]
             if (xi - xj) ** 2 + (yi - yj) ** 2 < eps2:
-                union(i, j)
+                # 两点要连通, 至少有一端是核心点 —— 两个边缘点之间不搭桥,
+                # 链式就断在这里
+                if core[i] or core[j]:
+                    union(i, j)
 
     groups: dict[int, list[int]] = {}
     for i in range(n):
@@ -109,10 +132,29 @@ def derive_density_cluster(scene: Scene, rule: dict[str, Any], cls_id: str,
     eps = cluster_eps(objs, scene.diag, rule)
     centers = [o.center for o in objs]
     events = []
-    for group in _union_find_cluster(centers, eps):
+    for group in _union_find_cluster(centers, eps,
+                                     int(rule.get("min_core_neighbors", 0))):
         if len(group) < rule["min_cluster_size"]:
             REJECTS[cls_id][f"单簇规模不足(<{rule['min_cluster_size']})"] += 1
             continue
+        # **簇要够密, 不能只够大。** 自由看图里 DroneCrowd 那几张的标注有
+        # 158/175 个人头, 模型的原话却是"呈散点状分布, 并非密集拥挤" ——
+        # 人是散在整个广场上的。实测过两个候选判据:
+        #   最近邻距离  散布 1.90~3.26 倍身长, 聚集 1.40~3.28  -> 完全重叠, 没用
+        #   每目标占的簇面积  散布 27~32 倍目标面积, 聚集 5.4~16.5  -> 分得开
+        # 所以用后者。门槛 20 倍: 散布的全挡掉, 真聚集全放行。
+        max_area = float(rule.get("max_area_per_object", 0) or 0)
+        if max_area:
+            gxs = [centers[i][0] for i in group]
+            gys = [centers[i][1] for i in group]
+            box_a = max(1.0, (max(gxs) - min(gxs)) * (max(gys) - min(gys)))
+            sz = sorted(max(objs[i].bbox[2] - objs[i].bbox[0],
+                            objs[i].bbox[3] - objs[i].bbox[1]) for i in group)
+            obj_a = max(1.0, sz[len(sz) // 2] ** 2)
+            per = box_a / len(group) / obj_a
+            if per > max_area:
+                _veto(cls_id, "簇不够密(目标散布在大片区域上, 不是聚集)")
+                continue
         cls_in_group = {objs[i].cls.lower() for i in group}
         if require and not (cls_in_group & require):
             REJECTS[cls_id]["不含军事目标(require_any)"] += 1

@@ -16,7 +16,7 @@
 #   - v0.2.1: 军用/民用目标分开命名(military-plane vs civil-plane),
 #     民用机场机群与民用港口因此成为困难负样本而非误标为集结
 
-version: "0.5.3"
+version: "0.5.4"
 box_scale: 1000                 # grounding 坐标归一化上限, Qwen-VL 系列用 1000
 negative_ratio_target: 0.30     # normal 样本占比下限
 qa_per_anomaly_target: 25000    # 每个异常类的 QA 条数目标
@@ -57,6 +57,19 @@ classes:
           min_cluster_size: 20
           eps_ratio: 0.04
           eps_obj_mult: 3.0        # 邻域半径下限 = 3 倍目标尺寸, 使判定不随裁剪尺寸漂移
+          # v0.5.4 新增两条, **都是自由看图逼出来的**。
+          # DroneCrowd 那几张标注有 158/175 个人头, 模型的原话却是
+          # 「呈散点状分布，并非密集拥挤」「人群非常稀疏」—— 人是散在整个广场上的。
+          #
+          # 根因是单链接聚类的链式效应: 纯 union-find 等价于 DBSCAN 的 minPts=1,
+          # 一广场零散行人只要首尾相接就串成一个大簇。实测 1920x1080 里 158 人
+          # 均匀散布(绝非聚集)照样聚出 20 人的簇, 刚好撞上 min_cluster_size。
+          #   min_core_neighbors  = DBSCAN 的 minPts, 只有核心点能连通两团
+          #   max_area_per_object = 簇要够密: 每个目标平均占的簇面积 / 目标面积
+          # 后者的门槛是量出来的: 均匀散布 27~32 倍, 真聚集 5.4~16.5 倍。
+          # (最近邻距离试过, 两者 1.4~3.3 完全重叠, 没用。)
+          min_core_neighbors: 3
+          max_area_per_object: 20
           # 补量用的放宽档。只在该类产量不够时由 derive_events --relax-below 启用,
           # 命中的事件打 relaxed 标记, 答案改用"小规模聚集"这类留有余地的说法,
           # 不会拿放宽出来的样本去冒充典型集结。
@@ -80,6 +93,10 @@ classes:
           min_cluster_size: 5
           eps_ratio: 0.06
           eps_obj_mult: 3.0        # 同上; DOTA 切片后图像变小, 只按对角线取会漏判
+          # 装备类目标大、间距相对身长小(停机坪上飞机间距约 2-3 倍机身),
+          # 所以密度门槛可以比人员松, 核心点要求也低一档(装备本来就少)。
+          min_core_neighbors: 2
+          max_area_per_object: 12
           relax:
             min_cluster_size: 3    # 3 件军事装备集中停放, 只能说"小规模集结迹象"
             eps_ratio: 0.08
