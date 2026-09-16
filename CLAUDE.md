@@ -153,7 +153,7 @@ civil_cluster    → 未见异常。画面中虽有12辆车辆密集成簇、达
 | 数据体检 | `tools/inspect_data.py` | 标注统计 + VLM 自由看图 |
 | 回归测试 | `tests/*.py` | qc_fixture / merge_fixture |
 
-### 语料现状（2026-09-16，ERA 单帧补齐 + massing 密度修复之后）
+### 语料现状（2026-09-16，方案 A 落地后）
 
 **59599 个 scene / 9 个数据源**（`data/all.jsonl`）：
 
@@ -163,50 +163,32 @@ Mendeley-UAV-Mil    3982     MAR20              3842    DOTA-v2.0          3181
 DroneCrowd          3176     ERA                2701    ERA-SingleFrames   2701
 ```
 
-各类事件产量（`data/all_ev.jsonl`）：
+各类事件产量（`data/all_ev.jsonl`）—— **三个类都有自由看图的实证背书**：
 
-| 类 | 事件数 | 距 25000/类 | 备注 |
+| 类 | 事件数 | 来源 | 实证 |
 |---|---|---|---|
-| smoke | 12899 | 52% | 自由看图 12/12 确认 |
-| explosion | 8259 | 33% | 自由看图 12/12 确认 |
-| massing（personnel 6224 + equipment 1829） | 8053 | 32% | v0.5.4 密度闸砍掉 780 条 |
-| convoy | 603 | 2.4% | **自由看图 12 张里 7 张模型说是「静止停放」** |
+| smoke | 12899 | FASDD_UAV | 自由看图 12/12 确认 |
+| explosion | 8259 | FASDD_UAV + ERA | 自由看图 12/12 确认 |
+| massing/personnel | 923 | **仅 ERA 游行/抗议/集会** | 真异常事件 |
+| massing/equipment | 84 | Mendeley 坦克簇 | 自由看图确认「纵队或楔形编队」 |
 
-困难负样本占正常样本 **32.3%**（达标 ≥30%）。
+**困难负样本 18878**（占正常样本 41.7%），其中 DroneCrowd 3176 + VisDrone 4045
+是按 `hard_negative_datasets` 转过来的。
+
+⚠️ **类间比例 12.9:1（smoke : massing），严重失衡。** `apply_quota` 现在会显眼
+报出来。要么给 massing 补数据源，要么对 smoke 主动下采样 —— **不要靠在 massing
+的同一批画面上反复出题来凑**，那是同质化不是数据量。
 
 ⚠️ **ERA / ERA-SingleFrames 是同一批 2701 段素材的两种形态**，排配额时不能算两次。
 ERA-SF 的**目标框是 0**（ERA 本来没有 bbox），只能出描述题和判定题。
 
 ### ⛔ 未决问题
 
-1. **massing/personnel 有 73% 误报 —— 定向复查证实，密度修复没解决问题。**
-   复查报告：`docs/16_free_look_massing_recheck.md`（15 张，逐条人工核对）
-
-   | 标注 | 模型原话 | |
-   |---|---|---|
-   | 99 人 | 画面中**没有**看到明显的人群聚集 | ✗ |
-   | 169 人 | 零散分布的微小黑点…**绝对没有"密密麻麻一片"的情况** | ✗ |
-   | 117 人 | 人群**非常稀疏**，呈点状分布 | ✗ |
-   | 206 人 | 路口附近**聚集的人群，数量较多** | ✓ |
-
-   **11/15 误报，1 确认，3 边缘。**
-
-   **根因是类目错配，不是阈值。** DroneCrowd 是人群**计数**数据集，拍的是广场、
-   校园、路口、球场 —— 里面根本没有「异常聚集」这个现象。从「校园广场上 117 个
-   行人」提不出异常，再准的密度判据也提不出。和 convoy / border_crossing 同类：
-   **数据里没有我们要的东西**。
-
-   机制已就绪（`rule.hard_negative_datasets`），**等决策**：
-   - **A（推荐）**：DroneCrowd/VisDrone 只做困难负样本 + 计数题，
-     `massing/personnel` 只保留 ERA 的游行/抗议/集会（918 条）。
-     massing 从 8053 → 约 1000。
-   - **B**：再紧一轮阈值再复查。对能救回多少不乐观。
-
-2. 各类都够不到 25000/类的目标。**这是要接受还是要补数据源的决策题。**
+1. **类间比例 12.9:1**（smoke 12899 : massing 1007）。补数据源还是下采样，待定。
+2. 各类都够不到 25000/类。**要接受还是补数据源的决策题。**
    注意事件数 ≠ QA 条数：一个 scene 能出多道题，所以 QA 总量会高于事件数，
    但类间比例基本由事件数决定。
-
-3. **单帧几何分不出车队和密集车流**（convoy 已因此停用，见上）。
+3. **单帧几何分不出车队和密集车流**（convoy 已因此停用）。
 4. **数据源层面的「类目错配」是最贵的一类错**，比阈值错贵得多：阈值能调，
    数据里没有的现象调不出来。新接一个数据源时先问「它到底拍的是什么」，
    再问「这个现象在里面存在吗」——`convoy` / `border_crossing` /
@@ -245,9 +227,9 @@ python tools/inspect_data.py --scenes data/all_ev.jsonl --out-dir data/inspect -
 # 5. golden set（必须先做，否则泄漏）
 python tools/make_golden.py --scenes data/all_ev.jsonl --out-dir data/golden
 
-# 6. 规则侧 QA
+# 6. 规则侧 QA —— **--target-per-class 必须传**，否则负样本不受控
 python tools/build_vqa.py --scenes data/all_ev.jsonl --out-dir data/vqa_rule \
-    --exclude-ids data/golden/exclude_ids.txt
+    --exclude-ids data/golden/exclude_ids.txt --target-per-class 25000
 
 # 7. 大模型侧描述
 python tools/llm_qa.py generate --scenes data/all_ev.jsonl --out data/vqa_llm/all.json \

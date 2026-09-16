@@ -922,7 +922,8 @@ def scene_quality(scenes: list[Scene]) -> dict[str, float]:
 
 
 def apply_quota(samples: list[dict], target: int, seed: int = 0,
-                quality: dict[str, float] | None = None) -> list[dict]:
+                quality: dict[str, float] | None = None,
+                neg_target: float = 0.3) -> list[dict]:
     """按异常类配额: 多的筛精, 少的原样保留并在报告里点名缺口。
 
     富余类不是随机丢, 是**按质量分排序后在各数据源之间轮着取**:
@@ -952,8 +953,26 @@ def apply_quota(samples: list[dict], target: int, seed: int = 0,
     rng = random.Random(seed)
     out: list[dict] = []
     report: list[tuple[str, int, int, float]] = []
-    for cls, group in by_cls.items():
-        tgt = target if cls != "normal" else int(target * len(by_cls) * 3 / 7)
+
+    # **负样本配额必须从"实际留下多少正样本"反推, 不能从 target 推。**
+    # 原来写的是 target * 类数 * 3/7, 即拿**愿望值**去算。可各异常类根本达不到
+    # target: smoke 12899 / explosion 8259 / massing 1007, 加起来 22165,
+    # 而这个公式给负样本算出 25000*4*3/7 = 42857 —— 负样本是正样本的两倍,
+    # 占比 66% 而目标是 30%。那样训出来的模型会学成"一律回答没异常"。
+    # 先把异常类过一遍, 数清实际留下多少, 再按比例给 normal 定额。
+    anomaly_cls = [c for c in by_cls if c != "normal"]
+    kept_pos = sum(min(len(by_cls[c]), target) for c in anomaly_cls)
+    neg_ratio = float(neg_target or 0.3)
+    normal_tgt = int(kept_pos * neg_ratio / max(1e-6, 1.0 - neg_ratio))
+
+    def _tgt(cls: str) -> int:
+        return normal_tgt if cls == "normal" else target
+
+    # 先跑异常类, 再跑 normal —— 顺序无关紧要(额度已提前算好), 但让报告里
+    # 异常类排在前面更好读。
+    for cls in sorted(by_cls, key=lambda c: (c == "normal", c)):
+        group = by_cls[cls]
+        tgt = _tgt(cls)
         if len(group) <= tgt:
             out.extend(group)
             report.append((cls, len(group), len(group), 0.0))
@@ -994,7 +1013,7 @@ def apply_quota(samples: list[dict], target: int, seed: int = 0,
 
     print("\n按类别配额(规则侧)。归属列 = 归到本类名下的条数, 覆盖列 = 含本类的全部条数:")
     for cls, before, after, q in sorted(report, key=lambda r: -r[1]):
-        tgt = target if cls != "normal" else int(target * len(by_cls) * 3 / 7)
+        tgt = _tgt(cls)
         cov = final.get(cls, 0)
         if before > after:
             note = f"✅ 从 {before} 择优保留(平均质量分 {q:.2f})"
@@ -1006,6 +1025,15 @@ def apply_quota(samples: list[dict], target: int, seed: int = 0,
         else:
             note = "✅"
         print(f"  {cls:20s} 归属 {after:7d}  覆盖 {cov:7d} / 目标 {tgt:6d}  {note}")
+    # 负样本占比: 这是训练判定能力的关键配比, 必须核对而不是只报告
+    n_neg = final.get("normal", 0)
+    n_pos = sum(n for c, n in final.items() if c != "normal")
+    if n_neg + n_pos:
+        ratio = n_neg / (n_neg + n_pos)
+        ok = abs(ratio - neg_target) <= 0.05
+        print(f"  负样本占比: {ratio:.0%}  目标 {neg_target:.0%}  "
+              f"{'✅' if ok else '⚠ 偏离目标, 检查 negative_ratio_target 与可用负样本数'}")
+
     multi = sum(1 for s in out if len(meta_of(s)["anomaly"]) > 1)
     if multi:
         print(f"  其中 {multi} 条同时属于多个异常类(如烟雾与爆炸同框), "
@@ -1019,9 +1047,14 @@ def apply_quota(samples: list[dict], target: int, seed: int = 0,
         ratio = hi[1] / max(1, lo[1])
         verdict = ("✅ 均衡" if ratio <= 2 else
                    "✅ 轻微不均, 不影响训练" if ratio <= 3 else
-                   "⚠ 偏斜明显, 建议训练时对少的那类加采样权重")
+                   "⚠ 偏斜明显, 建议训练时对少的那类加采样权重" if ratio <= 8 else
+                   "❌ 严重失衡 —— 最稀的那一类会被淹掉")
         print(f"  类间比例: 最多 {hi[0]} {hi[1]} / 最少 {lo[0]} {lo[1]} = "
               f"{ratio:.1f}:1  {verdict}")
+        if ratio > 8:
+            print(f"    要么给 {lo[0]} 补数据源, 要么对 {hi[0]} 主动下采样;")
+            print(f"    **不要靠在 {lo[0]} 的同一批画面上反复出题来凑** —— "
+                  f"那是同质化, 不是数据量。")
     return out
 
 
@@ -1066,7 +1099,8 @@ def main() -> None:
     samples = [qa for s in scenes for qa in builder.build(s)]
     if args.target_per_class:
         samples = apply_quota(samples, args.target_per_class, args.seed,
-                              quality=scene_quality(scenes))
+                              quality=scene_quality(scenes),
+                              neg_target=float(onto.get("negative_ratio_target", 0.3)))
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
