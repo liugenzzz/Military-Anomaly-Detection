@@ -8,7 +8,8 @@
 >
 > 重定后的体系是**层次化多标签**：领域(air/sea/land) × 族(行为/征候) × 二级类型(训练标签)。
 > 设计过程见 `docs/00_RESTART_BRIEF.md`（为什么要重来）、`docs/01_taxonomy_draft.md`
-> （体系怎么设计的）、`docs/02_data_strategy.md`（数据从哪来）。
+> （体系怎么设计的）、`docs/02_data_strategy.md`（数据从哪来）、
+> `docs/03_HANDOFF_IMPL.md`（**下一步怎么实现** —— 交接给实现方的细则）。
 > **权威定义只有一处：`configs/ontology.yaml`。** 文档是过程记录，配置是结论。
 
 ---
@@ -284,6 +285,10 @@ ERA-SF 的**目标框是 0**（ERA 本来没有 bbox），只能出描述题和�
    `DroneCrowd 的 massing` / `ERA 的演唱会` 四次都栽在这里。
 
 ### 📋 待办（按优先级）
+
+> **实现细则见 `docs/03_HANDOFF_IMPL.md`** —— 下面 1–4 条的逐文件逐行改法、
+> 真值表、验收标准和红线都在那里，不要凭这份清单直接动手。
+
 
 1. **重跑 `derive_events`**，把 v1.0 本体下各类的真实产量统计出来
    （massing 清理后还剩多少、disaster 恢复后有多少）
